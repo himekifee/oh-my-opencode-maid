@@ -28,7 +28,9 @@
   "scripts": {
     "build": "bun build src/index.ts src/tui.ts --outdir dist --target bun --format esm --external @opencode-ai/plugin && tsc --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "typecheck:e2e": "tsc -p scripts/tsconfig.json",
+    "test": "bun test",
+    "e2e": "bun run scripts/e2e/run.ts"
   },
   "keywords": [
     "opencode",

@@ -51,12 +51,31 @@ No OpenCode source patch is required — only public plugin hooks plus OpenCode'
 
 ## 🚀 Install
 
+Just write the config — OpenCode downloads the published package from npm automatically. Register the **server** plugin in `.opencode/opencode.jsonc` (or your global `opencode.jsonc`):
+
+```jsonc
+{
+  "plugin": ["oh-my-opencode-maid"]
+}
+```
+
+Pin a specific version if you prefer reproducible installs:
+
+```jsonc
+{
+  "plugin": ["oh-my-opencode-maid@0.1.0"]
+}
+```
+
+The package also ships a separate **TUI** entry exported as `oh-my-opencode-maid/tui`. Enable it through OpenCode's TUI plugin manager — **do not** add the TUI entry to `opencode.jsonc`; that config loads the server runtime, and the TUI entry is intentionally not a server hook.
+
+<details>
+<summary>Install from source (development)</summary>
+
 ```bash
 bun install
 bun run build
 ```
-
-Register the **server** plugin in `.opencode/opencode.jsonc`:
 
 ```jsonc
 {
@@ -64,7 +83,7 @@ Register the **server** plugin in `.opencode/opencode.jsonc`:
 }
 ```
 
-The build also emits a separate **TUI** entry at `dist/tui.js`, exported as `oh-my-opencode-maid/tui`. Enable it through OpenCode's TUI plugin manager — **do not** add `dist/tui.js` to `opencode.jsonc`; that config loads the server runtime, and the TUI entry is intentionally not a server hook.
+</details>
 
 ## ⚙️ Configure
 

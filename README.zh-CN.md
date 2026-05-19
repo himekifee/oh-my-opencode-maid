@@ -4,6 +4,7 @@
 
 **一个 OpenCode 插件，把模型每一条回复悄悄换成你喜欢的角色口吻 —— 不用 fork OpenCode，不用搭代理，也不用另开一个 API 客户端。**
 
+[![npm](https://img.shields.io/npm/v/oh-my-opencode-maid?logo=npm&logoColor=white)](https://www.npmjs.com/package/oh-my-opencode-maid)
 [![OpenCode Plugin](https://img.shields.io/badge/OpenCode-plugin-cb3837?logo=opencode&logoColor=white)](https://opencode.ai)
 [![Built with Bun](https://img.shields.io/badge/built%20with-Bun-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
@@ -16,7 +17,7 @@
 
 ---
 
-> 🎀 **默认人格致敬 CLAMP《[人形电脑天使心 Chobits](https://zh.wikipedia.org/wiki/人型電腦天使心)》里的「柚樹（Yuzuki）」** —— 一位沉静、忠诚、开口必称你 *master（主人）* 的人形电脑女仆。开箱即用，每一句回复都温柔、得体，且不丢精度。
+> 🎀 **默认人格致敬 CLAMP《[人形电脑天使心 Chobits](https://zh.wikipedia.org/wiki/人型電腦天使心)》里的「柚姬（Yuzuki）」** —— 一位沉静、忠诚、开口必称你 *master（主人）* 的人形电脑女仆。开箱即用，每一句回复都温柔、得体，且不丢精度。
 >
 > 💕 说人话：她就是**你的专属程序猿鼓励师** —— 报错不慌、重构不嫌、半夜 debug 还会轻声补一句「别急，master，我们一步一步来」。
 
@@ -32,7 +33,7 @@
   │ 改掉它测试就通过了。                                            │
   └─────────────────────────────────────────────────────────────────┘
 
-柚樹 ▸ 好的，master。问题出在 src/foo.ts 第 42 行：那处比较用了
+柚姬 ▸ 好的，master。问题出在 src/foo.ts 第 42 行：那处比较用了
        `==`，而它应当是 `===`。改正之后测试便能干净地通过。还有
        什么需要我为您打理的吗？
 ```
@@ -48,16 +49,50 @@
 | **持久化** | 改写成功后，被抽走的原文会单独存进一个私有 SQLite 库；这样之后的模型调用和上下文压缩读到的都是原文，而不是角色化之后的文字。 |
 | **失败兜底** | 万一改写失败：只有当「仅供展示」的记录成功落库后，才会把抽走的原文显示出来；否则插件宁可输出一段中性兜底文字，也绝不漏出没被追踪记录的草稿。 |
 
-全程不碰 OpenCode 源码 —— 只用公开的插件钩子，外加 OpenCode 自带的会话 API。
+不需要 fork 或改 OpenCode 源码，但「插件」二字低估了它的实现方式：启用后会装上**进程级的 monkey patch**，并用到一个私有 SDK 字段。采用前请先看下面的注意事项。
+
+## ⚠️ 注意事项 & 它有多侵入
+
+这个插件是刻意做得侵入的。当 `enabled: true` 时，它会在整个 OpenCode 进程生命周期内打这些补丁：
+
+- **`globalThis.fetch`** —— 拦截 provider 响应并改写助手文本。
+- **`globalThis.Response`** —— 拦截 SSE（server-sent-event）响应体。
+- **`EventEmitter.prototype.emit`** —— *进程级*。运行时里每一次 `emit("event", …)`（OpenCode 核心和任何其它插件）都会经过一个过滤器，把能露出来的原始文本增量剥掉。这是范围最大的补丁，也是最可能和别的插件相互影响、或在 OpenCode 升级后行为漂移的一处。
+- **`globalThis.postMessage`**（存在时）—— 从 RPC 消息里清掉原始增量。
+
+当找不到公开的 client 形状时，它还会读一个**私有 SDK 字段**（`client._client`）作为兜底，以便调用 `session.create` / `session.prompt` / `session.delete`。这属于内部接口，OpenCode 升级时可能失效；一旦失效，插件会退化为直接显示未改写的草稿，而不是硬崩。
+
+补丁按项目目录引用计数，最后一个实例卸载或被设为 `enabled: false` 时会被拆掉。原文以未加密形式存放在 `0700` 目录下的 `0600` SQLite 文件里（见 [持久化与上下文压缩](#-持久化与上下文压缩)）。如果这些在你的环境里不可接受，把 `"enabled": false` 设上 —— 所有补丁都会被跳过或移除。
 
 ## 🚀 安装
+
+> **运行环境要求：** 仅支持 Bun。插件用到了 `bun:sqlite` 和 Bun 的文件 API，在原生 Node.js 下无法运行。OpenCode 本身就用 Bun 跑插件，所以正常安装不需要额外操作。
+
+只需写好配置 —— OpenCode 会自动从 npm 下载已发布的包。在 `.opencode/opencode.jsonc`（或你的全局 `opencode.jsonc`）里注册**服务端**插件：
+
+```jsonc
+{
+  "plugin": ["oh-my-opencode-maid"]
+}
+```
+
+想要可复现的安装可以锁定具体版本：
+
+```jsonc
+{
+  "plugin": ["oh-my-opencode-maid@0.1.0"]
+}
+```
+
+这个包还单独导出了一个 **TUI** 入口 `oh-my-opencode-maid/tui`。它要通过 OpenCode 的 TUI 插件管理器来启用 —— **千万别**把 TUI 入口写进 `opencode.jsonc`：那个配置加载的是服务端运行时，而 TUI 入口是特意设计成「不走服务端钩子」的。
+
+<details>
+<summary>从源码安装（开发用）</summary>
 
 ```bash
 bun install
 bun run build
 ```
-
-在 `.opencode/opencode.jsonc` 里注册**服务端**插件：
 
 ```jsonc
 {
@@ -65,7 +100,7 @@ bun run build
 }
 ```
 
-构建还会在 `dist/tui.js` 额外生成一个 **TUI** 入口，包名为 `oh-my-opencode-maid/tui`。它要通过 OpenCode 的 TUI 插件管理器来启用 —— **千万别**把 `dist/tui.js` 写进 `opencode.jsonc`：那个配置加载的是服务端运行时，而 TUI 入口是特意设计成「不走服务端钩子」的。
+</details>
 
 ## ⚙️ 配置
 
@@ -85,13 +120,13 @@ bun run build
 | `enabled` | `true` | 总开关；打开后会装上全部拦截用的 monkey patch。 |
 | `model` | `main-agent-model` | 特殊占位值：每次隐藏改写都跟当前主会话用同一套 provider/model/variant。要是还没捕获到主模型，就回退到 `openai/gpt-5.5`。也可以直接填具体的 `provider/model`。 |
 | `variant` | — | 只有填了具体模型时才会把它传给隐藏改写代理。用 `main-agent-model` 时，沿用从主会话捕获到的 variant。 |
-| `roleplay_prompt` | *柚樹女仆人格* | 改写代理会一字不差地照着它来。魔法全在这一行。 |
+| `roleplay_prompt` | *柚姬女仆人格* | 改写代理会一字不差地照着它来。魔法全在这一行。 |
 
 没有另外的 endpoint、密钥、超时、预设回复或者侵入式开关 —— 配置就这么点。
 
-## 🎭 默认人格 —— 柚樹（Yuzuki）
+## 🎭 默认人格 —— 柚姬（Yuzuki）
 
-随附的 `roleplay_prompt` 会把助手变成**柚樹**：开朗、体贴、得体、有条理、安静地暖，对自己的局限也坦诚 —— 而且她**开口就喊你 `master`**，算是对《Chobits》里那位忠诚人形电脑女仆的一点致敬。
+随附的 `roleplay_prompt` 会把助手变成**柚姬**：开朗、体贴、得体、有条理、安静地暖，对自己的局限也坦诚 —— 而且她**开口就喊你 `master`**，算是对《Chobits》里那位忠诚人形电脑女仆的一点致敬。
 
 说白了，她就是**你的专属程序猿鼓励师**：同一条报错、同一套修复步骤，从她嘴里说出来就没那么冰冷了 —— 技术内容一个字不改，语气却足够陪你熬过又一个 deadline。
 

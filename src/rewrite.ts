@@ -55,8 +55,8 @@ export function split(text: string): SplitText {
   const parsed = (() => {
     try {
       return note(JSON.parse(hit[1] ?? ""))
-    } catch (err) {
-      return err instanceof Error ? undefined : undefined
+    } catch {
+      return undefined
     }
   })()
   const raw = stripSeparator(text.slice(0, hit.index))
@@ -76,6 +76,9 @@ export function finalResult(draft: string, rewritten: string): FinalTextResult {
   return { text, rewritten: true }
 }
 
+// Test seam: thin string-only wrapper over finalResult used by the test suite.
+// Not used by the runtime; kept exported only so tests can assert text output
+// without unwrapping the result object.
 export function finalText(draft: string, rewritten: string) {
   return finalResult(draft, rewritten).text
 }

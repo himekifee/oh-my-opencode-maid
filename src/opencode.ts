@@ -179,13 +179,27 @@ export function disabledTools() {
   return { ...disabled }
 }
 
-export async function getSessionMeta(ctx: PluginInput, sessionID: string) {
-  const api = session(ctx)
+// Returned when a session lookup was attempted but failed (the client threw, or
+// the client shape is unexpected). Distinct from `undefined`, which means the
+// client stably exposes no `session.get` at all. Callers must fail closed on
+// this so a transiently-unresolvable session is never assumed to be a rewritable
+// root and thus risk contaminating a subagent transcript.
+export const SESSION_META_LOOKUP_FAILED = Symbol("oh-my-opencode-maid:session-meta-lookup-failed")
+
+export type SessionMetaResult = SessionMeta | undefined | typeof SESSION_META_LOOKUP_FAILED
+
+export async function getSessionMeta(ctx: PluginInput, sessionID: string): Promise<SessionMetaResult> {
+  let api: SessionApi
+  try {
+    api = session(ctx)
+  } catch {
+    return SESSION_META_LOOKUP_FAILED
+  }
   if (!api.get) return undefined
   try {
     return sessionMeta(await api.get({ sessionID, directory: ctx.directory }))
-  } catch (err) {
-    return err instanceof Error ? undefined : undefined
+  } catch {
+    return SESSION_META_LOOKUP_FAILED
   }
 }
 

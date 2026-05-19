@@ -4,6 +4,9 @@
   "description": "OpenCode plugin that rewrites assistant replies through a hidden rewrite agent.",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

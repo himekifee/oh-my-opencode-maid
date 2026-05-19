@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
 import { MAIN_AGENT_MODEL, applyMainConfig, loadConfig } from "./config"
 import { FAILURE, finalResult, HANDOFF, handoffSystemPrompt, maidAgentPrompt, split, type FinalTextResult } from "./rewrite"
-import { REWRITE_AGENT, createDeltaSuppressor, disabledTools, formatModel, getSessionMeta, resolveModel, runMaid, type ModelSpec, type SessionMeta } from "./opencode"
+import { REWRITE_AGENT, SESSION_META_LOOKUP_FAILED, createDeltaSuppressor, disabledTools, formatModel, getSessionMeta, resolveModel, runMaid, type ModelSpec, type SessionMeta } from "./opencode"
 import { PROVIDER_REWRITE_HEADER, createProviderFetch, installProviderRewrite, installPublicStreamGate, uninstallProviderRewrite, uninstallPublicStreamGate } from "./patch"
 import { createResponseStore, type PendingProviderOriginal, type ResponseKey, type ResponseStore, type SessionOriginal } from "./responses"
 import { DISPLAY_ONLY_FALLBACK } from "./fallback"
@@ -228,9 +228,21 @@ const MaidPlugin: Plugin = async (ctx) => {
     if (roots.has(id)) return false
     const meta = await getSessionMeta(ctx, id)
     if (isDeletedSession(id)) return false
+    // Fail closed: if the lookup failed we cannot prove this is a rewritable
+    // root, so treat it as passthrough for this turn rather than risk rewriting
+    // (and persisting into) a subagent transcript. Left uncached so the next
+    // turn re-attempts classification once the transient failure clears.
+    if (meta === SESSION_META_LOOKUP_FAILED) return true
     rememberSession(meta, id)
     return passthrough.has(id)
   }
+  // Canonical "should this handler ignore the session" gate. The trailing
+  // isDeletedSession recheck is deliberate: isPassthrough awaits a session
+  // lookup, during which the session may be deleted, so the post-await state
+  // must be re-read. Handlers needing extra guards (rewrite-scope, pending
+  // rewrites) add them after this call.
+  const skipSession = async (id: string) =>
+    isDeletedSession(id) || isGuardedRewrite(id) || (await isPassthrough(id)) || isDeletedSession(id)
   const rememberMainModel = (sessionID: string | undefined, model: unknown, variant?: unknown) => {
     if (!sessionID || isGuardedRewrite(sessionID) || isDeletedSession(sessionID)) return
     const spec = modelFromInput(model, variant)
@@ -368,28 +380,19 @@ const MaidPlugin: Plugin = async (ctx) => {
 
     "chat.message": async (input) => {
       if (!cfg.enabled) return
-      if (isDeletedSession(input.sessionID)) return
-      if (isGuardedRewrite(input.sessionID)) return
-      if (await isPassthrough(input.sessionID)) return
-      if (isDeletedSession(input.sessionID)) return
+      if (await skipSession(input.sessionID)) return
       rememberMainModel(input.sessionID, input.model, input.variant)
     },
 
     "chat.params": async (input) => {
       if (!cfg.enabled) return
-      if (isDeletedSession(input.sessionID)) return
-      if (isGuardedRewrite(input.sessionID)) return
-      if (await isPassthrough(input.sessionID)) return
-      if (isDeletedSession(input.sessionID)) return
+      if (await skipSession(input.sessionID)) return
       rememberMainModel(input.sessionID, input.model, stringField(input, "variant"))
     },
 
     "chat.headers": async (input, output) => {
       if (!cfg.enabled) return
-      if (isDeletedSession(input.sessionID)) return
-      if (isGuardedRewrite(input.sessionID)) return
-      if (await isPassthrough(input.sessionID)) return
-      if (isDeletedSession(input.sessionID)) return
+      if (await skipSession(input.sessionID)) return
       if (isGuardedRewrite(input.sessionID)) return
       if (rewriteScope.getStore() === true) return
       rememberMainModel(input.sessionID, input.model, stringField(input, "variant"))
@@ -432,10 +435,7 @@ const MaidPlugin: Plugin = async (ctx) => {
           if (!record(part)) continue
           if (part.type !== "text" || typeof part.text !== "string") continue
           const sessionID = infoSessionID ?? stringField(part, "sessionID")
-          if (!sessionID || isDeletedSession(sessionID) || isGuardedRewrite(sessionID)) continue
-          if (await isPassthrough(sessionID)) continue
-          if (isDeletedSession(sessionID)) continue
-          if (isGuardedRewrite(sessionID)) continue
+          if (!sessionID || await skipSession(sessionID) || isGuardedRewrite(sessionID)) continue
           const partMessageID = messageID ?? stringField(part, "messageID")
           const partID = stringField(part, "id") ?? stringField(part, "partID")
           if (!partMessageID || !partID) continue
@@ -457,10 +457,7 @@ const MaidPlugin: Plugin = async (ctx) => {
 
     "experimental.session.compacting": async (input, output) => {
       if (!cfg.enabled || !responses) return
-      if (isDeletedSession(input.sessionID)) return
-      if (isGuardedRewrite(input.sessionID)) return
-      if (await isPassthrough(input.sessionID)) return
-      if (isDeletedSession(input.sessionID)) return
+      if (await skipSession(input.sessionID)) return
       if (isGuardedRewrite(input.sessionID)) return
       if (hasPendingForSession(input.sessionID)) return
       try {

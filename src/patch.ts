@@ -110,9 +110,9 @@ function frame(block: string, state: State) {
     const clean = cleanseMany(parsed, state)
     if (clean === undefined) return ""
     return clean.map((item) => `data: ${JSON.stringify(item)}\n\n`).join("")
-  } catch (err) {
+  } catch {
     if (likelyPublicRawTextDelta(data)) return ""
-    return err instanceof Error ? `${block}\n\n` : `${block}\n\n`
+    return `${block}\n\n`
   }
 }
 
@@ -125,9 +125,9 @@ function rpc(message: unknown, state: State) {
     if (clean === undefined) return undefined
     const next = clean.map((item) => JSON.stringify({ ...parsed, data: item }))
     return next.length === 1 ? next[0] : next
-  } catch (err) {
+  } catch {
     if (likelyPublicRawTextDelta(message)) return undefined
-    return err instanceof Error ? message : message
+    return message
   }
 }
 
@@ -194,8 +194,9 @@ function external(input: RequestInfo | URL, hook: ProviderHook) {
   const url = typeof input === "string" || input instanceof URL ? input : input.url
   try {
     return new URL(url).origin !== hook.server
-  } catch (err) {
-    return err instanceof Error
+  } catch {
+    // Unparseable URL: treat as external so it is never mistaken for the local server.
+    return true
   }
 }
 
@@ -249,8 +250,8 @@ function pevent(block: string): ProviderEvent | undefined {
     const json = JSON.parse(data) as unknown
     if (!record(json)) return { data, tool: false }
     return { data, json, text: ptext(json), tool: ptool(json) }
-  } catch (err) {
-    return err instanceof Error ? { data, tool: false } : { data, tool: false }
+  } catch {
+    return { data, tool: false }
   }
 }
 
@@ -321,8 +322,8 @@ async function pjson(res: Response, hook: ProviderHook, sessionID?: string) {
       return clone(res, JSON.stringify({ ...parsed, choices: choices.map((choice, index) => pmessage(choice, index === 0 ? visible : "")) }))
     }
     return clone(res, raw)
-  } catch (err) {
-    return err instanceof Error ? clone(res, raw) : clone(res, raw)
+  } catch {
+    return clone(res, raw)
   }
 }
 
@@ -446,6 +447,9 @@ export function createProviderFetch(hook: ProviderHook, fetcher: typeof fetch = 
   return wrapped
 }
 
+// Test seam: hard-restores every patched global in one call so tests start from
+// a clean process. Not used by the runtime, which unwinds patches per-owner via
+// uninstallProviderRewrite / uninstallPublicStreamGate instead.
 export function resetPublicStreamGate() {
   const box = root()
   if (!box[key]) return

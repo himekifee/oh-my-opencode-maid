@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite"
-import { chmod, mkdir } from "node:fs/promises"
+import { chmod, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { DISPLAY_ONLY_FALLBACK } from "./fallback"
 
@@ -55,6 +55,15 @@ export function responseDatabasePath() {
 export async function createResponseStore(): Promise<ResponseStore> {
   const file = responseDatabasePath()
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  // The 0700 parent directory is the real access guarantee. Pre-creating the DB
+  // file with 0600 (and re-chmod'ing below for pre-existing files) closes the
+  // window where the original assistant text would otherwise be readable at the
+  // process umask between file creation and chmod.
+  try {
+    await writeFile(file, "", { flag: "wx", mode: 0o600 })
+  } catch (error) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === "EEXIST")) throw error
+  }
   const db = new Database(file, { create: true })
   await chmod(file, 0o600)
   db.exec("PRAGMA journal_mode = WAL")
@@ -265,6 +274,10 @@ export async function createResponseStore(): Promise<ResponseStore> {
   }
 }
 
+// SQLite cannot bind identifiers, so table/column/definition are interpolated.
+// This is injection-safe only because every argument is a hardcoded literal
+// from this module (no user/config/network input ever reaches it). Keep it that
+// way: never pass caller-derived values here.
 function ensureColumn(db: Database, table: string, column: string, definition: string) {
   const exists = db.query(`PRAGMA table_info(${table})`).all().some((row) => record(row) && row.name === column)
   if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`)

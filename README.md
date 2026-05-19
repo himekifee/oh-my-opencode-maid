@@ -4,6 +4,7 @@
 
 **An OpenCode plugin that quietly rewrites every assistant reply in a roleplay voice — no fork, no proxy, no separate API client.**
 
+[![npm](https://img.shields.io/npm/v/oh-my-opencode-maid?logo=npm&logoColor=white)](https://www.npmjs.com/package/oh-my-opencode-maid)
 [![OpenCode Plugin](https://img.shields.io/badge/OpenCode-plugin-cb3837?logo=opencode&logoColor=white)](https://opencode.ai)
 [![Built with Bun](https://img.shields.io/badge/built%20with-Bun-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
@@ -47,9 +48,24 @@ Facts, code, commands, paths, URLs, numbers, and markdown structure are preserve
 | **Persist** | Successful rewrites store the stripped original in a private SQLite sidecar so future model calls and compaction see the *original*, not the persona text. |
 | **Fail closed** | If a rewrite fails, the stripped original is shown only after display-only bookkeeping is persisted; otherwise the plugin emits neutral fallback text instead of leaking an untracked draft. |
 
-No OpenCode source patch is required — only public plugin hooks plus OpenCode's session APIs.
+No OpenCode fork or source patch is required, but "plugin" undersells the mechanism: enabling it installs **process-wide monkey patches** and uses one private SDK field. Read the caveats below before adopting it.
+
+## ⚠️ Caveats & how invasive this is
+
+This plugin is deliberately invasive. With `enabled: true` it patches, for the lifetime of the OpenCode process:
+
+- **`globalThis.fetch`** — to intercept provider responses and rewrite assistant text.
+- **`globalThis.Response`** — to gate server-sent-event bodies.
+- **`EventEmitter.prototype.emit`** — *process-wide*. Every `emit("event", …)` in the runtime (OpenCode core and any other plugin) passes through a filter that strips reachable raw-text deltas. This is the broadest patch and the one most likely to interact with other plugins or shift behavior across an OpenCode upgrade.
+- **`globalThis.postMessage`** (when present) — to scrub raw deltas from RPC messages.
+
+It also reads a **private SDK field** (`client._client`) as a fallback when the public client shape isn't found, in order to reach `session.create` / `session.prompt` / `session.delete`. That is internal surface and may break on an OpenCode upgrade; if it does, the plugin degrades to showing the un-rewritten draft rather than failing hard.
+
+Patches are reference-counted per project directory and torn down when the last instance unloads or is set to `enabled: false`. Originals are stored unencrypted in a `0600` SQLite file under a `0700` directory (see [Persistence & compaction](#-persistence--compaction)). If any of this is unacceptable in your environment, set `"enabled": false` — every patch is then skipped or removed.
 
 ## 🚀 Install
+
+> **Requirements:** Bun-only. The plugin uses `bun:sqlite` and Bun file APIs and will not run under plain Node.js. OpenCode already runs plugins under Bun, so a normal install needs nothing extra.
 
 Just write the config — OpenCode downloads the published package from npm automatically. Register the **server** plugin in `.opencode/opencode.jsonc` (or your global `opencode.jsonc`):
 

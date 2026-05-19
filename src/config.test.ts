@@ -49,7 +49,7 @@ describe("config", () => {
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
       expect(cfg.roleplay_prompt).toContain("maid assistant")
-      expect(cfg.roleplay_prompt).toContain("respectful service tone")
+      expect(cfg.roleplay_prompt).toContain("courteous")
       expect(cfg.roleplay_prompt).toContain("Preserve facts")
       expect(cfg.roleplay_prompt).not.toMatch(/Chobits|Minoru|Kaede/)
       expect(DEFAULT_MODEL).toBe(MAIN_AGENT_MODEL)

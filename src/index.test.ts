@@ -77,6 +77,8 @@ function resetPluginGlobals() {
   delete globalThis.__ohMyOpencodeMaidDeleted
   delete globalThis.__ohMyOpencodeMaidRoots
   delete globalThis.__ohMyOpencodeMaidRewriteGuards
+  for (const timer of globalThis.__ohMyOpencodeMaidCompacting?.values() ?? []) clearTimeout(timer)
+  delete globalThis.__ohMyOpencodeMaidCompacting
   delete globalThis.__ohMyOpencodeMaidProviderOriginals
   delete globalThis.__ohMyOpencodeMaidResponses
   delete globalThis.__ohMyOpencodeMaidRewriteScope
@@ -1134,6 +1136,14 @@ describe("plugin hooks", () => {
       expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBe("Legacy provider raw SECRET_TOKEN")
       expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBeUndefined()
       expect(compacted.context.join("\n")).not.toContain("Legacy provider raw SECRET_TOKEN")
+      await hooks["experimental.compaction.autocontinue"]?.({
+        sessionID: "user-session",
+        agent: "build",
+        model: model(),
+        provider: { source: "config", info: {} as never, options: {} },
+        message: {} as never,
+        overflow: true,
+      }, { enabled: true })
       await hooks["experimental.text.complete"]?.(input, retry)
       expect(retry.text).toBe("Maid SECRET_TOKEN")
       expect(prompts).toBe(1)
@@ -1519,6 +1529,40 @@ describe("plugin hooks", () => {
       expect(output.text).toBe("Maid SECRET_TOKEN")
       expect(compacted.context.join("\n")).toContain("Raw SECRET_TOKEN")
       expect(compacted.context.join("\n")).not.toContain("Maid SECRET_TOKEN")
+    })
+  })
+
+  test("does not rewrite compaction provider headers or completed text", async () => {
+    await isolated(async (dir) => {
+      let prompts = 0
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          prompts += 1
+          throw new Error("unexpected rewrite")
+        },
+      }, dir))
+      const compacted = { context: [] as string[] }
+      const compactionOutput = { text: "Professional compaction summary SECRET_TOKEN" }
+
+      await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
+      const compactingHeaders = await providerHeaders(hooks)
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "compact" }, compactionOutput)
+
+      expect(compactingHeaders[PROVIDER_REWRITE_HEADER]).toBeUndefined()
+      expect(compactionOutput.text).toBe("Professional compaction summary SECRET_TOKEN")
+      expect(prompts).toBe(0)
+
+      await hooks["experimental.compaction.autocontinue"]?.({
+        sessionID: "user-session",
+        agent: "build",
+        model: model(),
+        provider: { source: "config", info: {} as never, options: {} },
+        message: {} as never,
+        overflow: true,
+      }, { enabled: true })
+
+      const normalHeaders = await providerHeaders(hooks)
+      expect(typeof normalHeaders[PROVIDER_REWRITE_HEADER]).toBe("string")
     })
   })
 

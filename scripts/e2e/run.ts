@@ -12,6 +12,9 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import {
+  COMPACTION_MODEL,
+  COMPACTION_SUMMARY,
+  COMPACTION_TRIGGER_TASK,
   MAIN_MODEL,
   PROVIDER_ID,
   RAW_DRAFT,
@@ -19,6 +22,7 @@ import {
   REWRITE_VARIANT,
   REWRITTEN_TEXT,
   ROLEPLAY_SENTINEL,
+  SMALL_CONTEXT_MODEL,
   USER_TASK,
   VARIANT_WIRE_SENTINEL,
 } from "./constants"
@@ -143,6 +147,9 @@ async function main() {
           $schema: "https://opencode.ai/config.json",
           autoupdate: false,
           share: "disabled",
+          small_model: `${PROVIDER_ID}/${COMPACTION_MODEL}`,
+          compaction: { auto: true, prune: false, tail_turns: 0, preserve_recent_tokens: 0, reserved: 64 },
+          agent: { compaction: { model: `${PROVIDER_ID}/${COMPACTION_MODEL}` } },
           plugin: [`file://${pluginEntry}`],
           provider: {
             [PROVIDER_ID]: {
@@ -151,6 +158,13 @@ async function main() {
               options: { baseURL: `${fake.url}/v1`, apiKey: "e2e-not-a-real-key" },
               models: {
                 [MAIN_MODEL]: { name: "Main", tool_call: false, reasoning: false },
+                [SMALL_CONTEXT_MODEL]: {
+                  name: "Small Context",
+                  tool_call: false,
+                  reasoning: false,
+                  limit: { context: 1_200, output: 100 },
+                },
+                [COMPACTION_MODEL]: { name: "Compaction", tool_call: false, reasoning: false },
                 [REWRITE_MODEL]: {
                   name: "Rewrite",
                   tool_call: false,
@@ -194,8 +208,18 @@ async function main() {
       { cwd: project, env, timeoutMs: RUN_TIMEOUT_MS },
     )
 
-    // 6. Read back the visible assistant text opencode persisted.
     const sessionID = rootSessionID(run.stderr)
+    let compactRun: Awaited<ReturnType<typeof sh>> | undefined
+    if (sessionID) {
+      process.stdout.write("· running opencode compaction trigger\n")
+      compactRun = await sh(
+        OPENCODE_BIN,
+        ["run", "--dir", project, "--session", sessionID, "--model", `${PROVIDER_ID}/${SMALL_CONTEXT_MODEL}`, "--print-logs", COMPACTION_TRIGGER_TASK],
+        { cwd: project, env, timeoutMs: RUN_TIMEOUT_MS },
+      )
+    }
+
+    // 6. Read back the visible assistant text opencode persisted.
     let exported = ""
     if (sessionID) {
       const exp = await sh(OPENCODE_BIN, ["export", sessionID, "--pure"], { cwd: project, env, timeoutMs: 60_000 })
@@ -210,6 +234,7 @@ async function main() {
 
     if (process.env.E2E_DEBUG) {
       process.stdout.write(`\n----- opencode stderr -----\n${run.stderr}\n`)
+      if (compactRun) process.stdout.write(`----- compaction trigger stderr -----\n${compactRun.stderr}\n`)
       process.stdout.write(`----- session ${sessionID ?? "(none)"} visible assistant text -----\n${visible}\n`)
       process.stdout.write(`----- fake requests -----\n${JSON.stringify(fake.requests, null, 2)}\n`)
     }
@@ -217,10 +242,19 @@ async function main() {
     // 7. Assertions.
     check("opencode exited cleanly", run.code === 0 && !run.timedOut, `code=${run.code} timedOut=${run.timedOut}`)
     check("a root session was created", Boolean(sessionID), "no root session id in opencode logs")
+    check(
+      "compaction trigger exited cleanly",
+      compactRun !== undefined && compactRun.code === 0 && !compactRun.timedOut,
+      `code=${compactRun?.code} timedOut=${compactRun?.timedOut}`,
+    )
 
     const mainReqs = fake.mainRequests()
+    const smallReqs = fake.smallMainRequests()
+    const compactionReqs = fake.compactionRequests()
     const rewriteReqs = fake.rewriteRequests()
     check("fake provider got the main agent turn", mainReqs.length >= 1, `main requests=${mainReqs.length}`)
+    check("fake provider got the small-context continuation", smallReqs.length >= 1, `small-context requests=${smallReqs.length}`)
+    check("fake provider got the compaction turn", compactionReqs.length >= 1, `compaction requests=${compactionReqs.length}`)
     check("fake provider got the hidden rewrite turn", rewriteReqs.length >= 1, `rewrite requests=${rewriteReqs.length}`)
 
     if (mainReqs.length) {
@@ -228,6 +262,25 @@ async function main() {
         `main turn used ${MAIN_MODEL}`,
         mainReqs.every((r) => r.model === MAIN_MODEL),
         `main models=${[...new Set(mainReqs.map((r) => r.model))].join(",")}`,
+      )
+    }
+    if (smallReqs.length) {
+      check(
+        `small-context turn used ${SMALL_CONTEXT_MODEL}`,
+        smallReqs.every((r) => r.model === SMALL_CONTEXT_MODEL),
+        `small-context models=${[...new Set(smallReqs.map((r) => r.model))].join(",")}`,
+      )
+      check(
+        "small-context continuation received the compaction summary",
+        smallReqs.some((r) => r.hasCompactionSummary),
+        `${COMPACTION_SUMMARY} was absent from the small-context continuation`,
+      )
+    }
+    if (compactionReqs.length) {
+      check(
+        `compaction turn used ${COMPACTION_MODEL}`,
+        compactionReqs.every((r) => r.model === COMPACTION_MODEL),
+        `compaction models=${[...new Set(compactionReqs.map((r) => r.model))].join(",")}`,
       )
     }
     if (rewriteReqs.length) {
@@ -245,6 +298,11 @@ async function main() {
         `rewrite turn carried the configured variant "${REWRITE_VARIANT}" on the wire`,
         rewriteReqs.every((r) => r.hasVariantSentinel),
         "VARIANT_WIRE_SENTINEL absent from a rewrite request body",
+      )
+      check(
+        "compaction summary was not sent to hidden rewrite",
+        rewriteReqs.every((r) => !r.hasCompactionSummary),
+        `${COMPACTION_SUMMARY} appeared in a rewrite request body`,
       )
     }
 

@@ -29,6 +29,7 @@ declare global {
   var __ohMyOpencodeMaidDeleted: Set<string> | undefined
   var __ohMyOpencodeMaidRoots: Set<string> | undefined
   var __ohMyOpencodeMaidRewriteGuards: Set<string> | undefined
+  var __ohMyOpencodeMaidCompacting: Map<string, ReturnType<typeof setTimeout>> | undefined
   var __ohMyOpencodeMaidResponses: ResponseStore | undefined
   var __ohMyOpencodeMaidRewriteScope: AsyncLocalStorage<boolean> | undefined
 }
@@ -126,6 +127,17 @@ function eventSession(input: unknown) {
   }
 }
 
+function compactionStartedSessionID(input: unknown) {
+  const event = eventPayload(input)
+  if (!record(event)) return undefined
+  const type = stringField(event, "type")
+  const name = stringField(event, "name")
+  const started = type === "session.next.compaction.started" || (type === "sync" && name === "session.next.compaction.started.1")
+  if (!started) return undefined
+  const source = record(event.properties) ? event.properties : record(event.data) ? event.data : undefined
+  return stringField(source, "sessionID")
+}
+
 function completedStore() {
   const existing = globalThis.__ohMyOpencodeMaidCompleted
   if (existing instanceof Map) return existing
@@ -163,6 +175,7 @@ const MaidPlugin: Plugin = async (ctx) => {
   const deleted = globalThis.__ohMyOpencodeMaidDeleted ??= new Set<string>()
   const roots = globalThis.__ohMyOpencodeMaidRoots ??= new Set<string>()
   const rewriteGuards = globalThis.__ohMyOpencodeMaidRewriteGuards ??= new Set<string>()
+  const compacting = globalThis.__ohMyOpencodeMaidCompacting ??= new Map<string, ReturnType<typeof setTimeout>>()
   const rewriteScope = globalThis.__ohMyOpencodeMaidRewriteScope ??= new AsyncLocalStorage<boolean>()
   const suppress = createDeltaSuppressor(hidden, passthrough)
   let baseFetch = globalThis.fetch
@@ -171,6 +184,20 @@ const MaidPlugin: Plugin = async (ctx) => {
     uninstallPublicStreamGate(ctx.directory)
   }
   const sessionKey = (sessionID: string) => `${ctx.directory}/${sessionID}`
+  const clearCompacting = (sessionID: string) => {
+    const compactingSession = sessionKey(sessionID)
+    const timer = compacting.get(compactingSession)
+    if (timer) clearTimeout(timer)
+    compacting.delete(compactingSession)
+  }
+  const markCompacting = (sessionID: string) => {
+    const compactingSession = sessionKey(sessionID)
+    clearCompacting(sessionID)
+    const timer = setTimeout(() => compacting.delete(compactingSession), PROVIDER_TOKEN_TTL)
+    if (typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") timer.unref()
+    compacting.set(compactingSession, timer)
+  }
+  const isCompacting = (sessionID: string) => compacting.has(sessionKey(sessionID))
   const isDeletedSession = (id: string) => deleted.has(sessionKey(id))
   const key = (input: RewritePartKey) => `${ctx.directory}/${input.sessionID}/${input.messageID}/${input.partID}`
   const responseKey = (input: RewritePartKey): ResponseKey => ({
@@ -191,6 +218,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       passthrough.delete(id)
       roots.delete(id)
       deleted.add(sessionKey(id))
+      clearCompacting(id)
       deleteCompletedForSession(id)
       deletePendingForSession(id)
       mainModels.delete(sessionKey(id))
@@ -375,6 +403,8 @@ const MaidPlugin: Plugin = async (ctx) => {
     event: async (input) => {
       if (!cfg.enabled) return
       learnSession(input.event)
+      const compactionSessionID = compactionStartedSessionID(input.event)
+      if (compactionSessionID) markCompacting(compactionSessionID)
       suppress(input.event)
     },
 
@@ -394,6 +424,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       if (!cfg.enabled) return
       if (await skipSession(input.sessionID)) return
       if (isGuardedRewrite(input.sessionID)) return
+      if (isCompacting(input.sessionID)) return
       if (rewriteScope.getStore() === true) return
       rememberMainModel(input.sessionID, input.model, stringField(input, "variant"))
       output.headers[PROVIDER_REWRITE_HEADER] = issueProviderToken(input.sessionID)
@@ -456,9 +487,11 @@ const MaidPlugin: Plugin = async (ctx) => {
     },
 
     "experimental.session.compacting": async (input, output) => {
-      if (!cfg.enabled || !responses) return
+      if (!cfg.enabled) return
       if (await skipSession(input.sessionID)) return
       if (isGuardedRewrite(input.sessionID)) return
+      markCompacting(input.sessionID)
+      if (!responses) return
       if (hasPendingForSession(input.sessionID)) return
       try {
         const originals = responses.getSessionOriginals(ctx.directory, input.sessionID, MAX_COMPACTION_ORIGINALS)
@@ -467,6 +500,11 @@ const MaidPlugin: Plugin = async (ctx) => {
       } catch {
         return
       }
+    },
+
+    "experimental.compaction.autocontinue": async (input) => {
+      if (!cfg.enabled) return
+      clearCompacting(input.sessionID)
     },
 
     "experimental.text.complete": async (input, output) => {
@@ -480,6 +518,7 @@ const MaidPlugin: Plugin = async (ctx) => {
         output.text = FAILURE
         return
       }
+      if (isCompacting(input.sessionID)) return
       if (rewriteScope.getStore() === true) {
         output.text = FAILURE
         return

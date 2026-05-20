@@ -111,6 +111,7 @@ bun run build
   "enabled": true,
   "model": "main-agent-model",
   // "variant": "optional-provider-variant-for-concrete-models",
+  "rewrite_context_size": 1,
   "roleplay_prompt": "Rewrite the assistant reply in English as Yuzuki, a cheerful and attentive maid assistant: gentle, courteous, precise, logically organized, quietly warm, and modest about limitations. Always call me master. Preserve facts, code, commands, paths, URLs, identifiers, numbers, markdown structure, and the user's requested meaning."
 }
 ```
@@ -120,6 +121,7 @@ bun run build
 | `enabled` | `true` | 总开关；打开后会装上全部拦截用的 monkey patch。 |
 | `model` | `main-agent-model` | 特殊占位值：每次隐藏改写都跟当前主会话用同一套 provider/model/variant。要是还没捕获到主模型，就回退到 `openai/gpt-5.5`。也可以直接填具体的 `provider/model`。 |
 | `variant` | — | 只有填了具体模型时才会把它传给隐藏改写代理。用 `main-agent-model` 时，沿用从主会话捕获到的 variant。 |
+| `rewrite_context_size` | `1` | 每次隐藏改写提示里包含的改写轮数，取值 `1` 到 `20`。`1` 只发送本次改写目标；更大的值会加入当前用户提示，并把同一根会话里之前成功改写的内容作为仅供参考的上下文加入。 |
 | `roleplay_prompt` | *柚姬女仆人格* | 改写代理会一字不差地照着它来。魔法全在这一行。 |
 
 没有另外的 endpoint、密钥、超时、预设回复或者侵入式开关 —— 配置就这么点。

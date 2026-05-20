@@ -8,12 +8,14 @@ const cfg: MaidConfig = {
   enabled: true,
   model: "openai/gpt-5.5",
   variant: "fast",
+  rewrite_context_size: 1,
   roleplay_prompt: "configured voice",
 }
 
 const sentinelCfg: MaidConfig = {
   enabled: true,
   model: MAIN_AGENT_MODEL,
+  rewrite_context_size: 1,
   roleplay_prompt: "configured voice",
 }
 
@@ -122,6 +124,35 @@ describe("opencode rewrite helpers", () => {
         input: { sessionID: "maid-session", directory: "/tmp/project" },
       },
     ])
+  })
+
+  test("passes current user prompt and previous rewrite context into the hidden prompt", async () => {
+    const calls: unknown[] = []
+    const hidden = new Set<string>()
+    const previousContext = [{ userPrompt: "Previous request", originalText: "Previous raw SECRET_TOKEN", visibleText: "Previous maid SECRET_TOKEN" }]
+    const session = {
+      async create(input: unknown) {
+        calls.push({ method: "create", input })
+        return { data: { id: "maid-session" } }
+      },
+      async prompt(input: unknown) {
+        calls.push({ method: "prompt", input })
+        return { data: { parts: [{ type: "text", text: "Maid SECRET_TOKEN" }] } }
+      },
+      async delete(input: unknown) {
+        calls.push({ method: "delete", input })
+        return { data: true }
+      },
+    }
+
+    await runMaid({ ctx: ctx(session), cfg, text: "Raw SECRET_TOKEN", currentUserPrompt: "Current request", previousContext, hidden })
+
+    expect(calls[1]).toEqual({
+      method: "prompt",
+      input: expect.objectContaining({
+        parts: [{ type: "text", text: maidUserPrompt({ cfg, text: "Raw SECRET_TOKEN", currentUserPrompt: "Current request", previousContext }) }],
+      }),
+    })
   })
 
   test("uses active main model for sentinel rewrite sessions without passing the sentinel", async () => {

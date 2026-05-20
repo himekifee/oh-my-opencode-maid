@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { DEFAULT_MODEL, MAIN_AGENT_MODEL, applyMainConfig, loadConfig } from "./config"
+import { DEFAULT_MODEL, MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig } from "./config"
 
 async function temp() {
   return mkdtemp(path.join(tmpdir(), "omo-maid-"))
@@ -46,6 +46,7 @@ describe("config", () => {
       expect(cfg).toEqual({
         enabled: true,
         model: DEFAULT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
       expect(cfg.roleplay_prompt).toContain("maid assistant")
@@ -58,6 +59,7 @@ describe("config", () => {
       expect(created).toEqual({
         enabled: true,
         model: DEFAULT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: cfg.roleplay_prompt,
       })
     })
@@ -75,6 +77,7 @@ describe("config", () => {
       expect(cfg).toEqual({
         enabled: false,
         model: DEFAULT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: "custom maid",
       })
       expect(await Bun.file(file).text()).toBe(original)
@@ -92,12 +95,14 @@ describe("config", () => {
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: true,
         model: DEFAULT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
       const created = JSON.parse(await Bun.file(userConfigFile()).text())
       expect(created).toEqual({
         enabled: true,
         model: DEFAULT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
@@ -109,6 +114,7 @@ describe("config", () => {
         enabled: true,
         model: "anthropic/claude-sonnet-4-5",
         variant: "thinking",
+        rewrite_context_size: 1,
         roleplay_prompt: "user maid",
       })
       await writeJson(projectConfigFile(dir), {
@@ -121,6 +127,7 @@ describe("config", () => {
         enabled: true,
         model: "anthropic/claude-sonnet-4-5",
         variant: "thinking",
+        rewrite_context_size: 1,
         roleplay_prompt: "user maid",
       })
     })
@@ -135,19 +142,21 @@ describe("config", () => {
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: true,
         model: DEFAULT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
   })
 
-  test("accepts only enabled, model, variant, and roleplay_prompt", async () => {
+  test("accepts only enabled, model, variant, roleplay_prompt, and rewrite_context_size", async () => {
     await isolated(async (dir) => {
-      await writeJson(userConfigFile(), { enabled: false, model: "anthropic/claude-sonnet-4-5", variant: "thinking", roleplay_prompt: "formal maid" })
+      await writeJson(userConfigFile(), { enabled: false, model: "anthropic/claude-sonnet-4-5", variant: "thinking", roleplay_prompt: "formal maid", rewrite_context_size: REWRITE_CONTEXT_MAX })
 
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: false,
         model: "anthropic/claude-sonnet-4-5",
         variant: "thinking",
+        rewrite_context_size: REWRITE_CONTEXT_MAX,
         roleplay_prompt: "formal maid",
       })
     })
@@ -163,6 +172,7 @@ describe("config", () => {
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: true,
         model: MAIN_AGENT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
@@ -177,6 +187,7 @@ describe("config", () => {
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: true,
         model: MAIN_AGENT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
@@ -198,6 +209,7 @@ describe("config", () => {
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: true,
         model: MAIN_AGENT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
@@ -260,6 +272,7 @@ describe("config", () => {
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: true,
         model: "openai/gpt-5.5",
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
@@ -281,6 +294,7 @@ describe("config", () => {
       expect(cfg).toEqual({
         enabled: true,
         model: MAIN_AGENT_MODEL,
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
@@ -305,6 +319,7 @@ describe("config", () => {
       expect(cfg).toEqual({
         enabled: true,
         model: "openai/gpt-5.5",
+        rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
       })
     })
@@ -333,6 +348,16 @@ describe("config", () => {
 
       await expect(loadConfig(dir)).rejects.toThrow('model must be main-agent-model or use provider/model format')
     })
+  })
+
+  test("rejects invalid rewrite_context_size values", async () => {
+    for (const value of [0, 1.5, REWRITE_CONTEXT_MAX + 1, "2"]) {
+      await isolated(async (dir) => {
+        await writeJson(userConfigFile(), { rewrite_context_size: value })
+
+        await expect(loadConfig(dir)).rejects.toThrow()
+      })
+    }
   })
 
   test("rejects stale dedicated API client config", async () => {

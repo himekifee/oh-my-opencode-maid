@@ -14,6 +14,8 @@ import {
   REWRITE_USER_MARKER,
   REWRITTEN_TEXT,
   ROLEPLAY_SENTINEL,
+  SECOND_RAW_DRAFT,
+  SECOND_USER_TASK,
   SMALL_CONTEXT_MODEL,
   USER_TASK,
   VARIANT_WIRE_SENTINEL,
@@ -67,7 +69,7 @@ function classify(model: string, text: string): RecordedRequest["kind"] {
   if (model === COMPACTION_MODEL) return "compaction"
   if (model === SMALL_CONTEXT_MODEL) return "small-main"
   if (text.includes(COMPACTION_TRIGGER_MARKER)) return "small-main"
-  if (text.includes(USER_TASK)) return "main"
+  if (text.includes(USER_TASK) || text.includes(SECOND_USER_TASK)) return "main"
   return "other"
 }
 
@@ -165,7 +167,10 @@ export function startFakeProvider(): FakeProvider {
         rawBody,
       })
 
-      const content = kind === "rewrite" ? REWRITTEN_TEXT : kind === "compaction" ? COMPACTION_SUMMARY : RAW_DRAFT
+      let content = RAW_DRAFT
+      if (kind === "rewrite") content = REWRITTEN_TEXT
+      else if (kind === "compaction") content = COMPACTION_SUMMARY
+      else if (messagesText.includes(SECOND_USER_TASK)) content = SECOND_RAW_DRAFT
       const wantsStream = (body as { stream?: unknown })?.stream === true
       return wantsStream ? sse(content, kind) : json(content, kind)
     },

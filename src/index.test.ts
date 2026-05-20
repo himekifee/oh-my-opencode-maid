@@ -14,6 +14,12 @@ import { FAILURE, HANDOFF, handoffSystemPrompt } from "./rewrite"
 type Hooks = Awaited<ReturnType<typeof MaidPlugin>>
 type Model = Parameters<NonNullable<Hooks["experimental.chat.system.transform"]>>[0]["model"]
 type MessagesOutput = Parameters<NonNullable<Hooks["experimental.chat.messages.transform"]>>[1]
+type ChatMessageInput = Parameters<NonNullable<Hooks["chat.message"]>>[0]
+type ChatMessageOutput = Parameters<NonNullable<Hooks["chat.message"]>>[1]
+
+function record(input: unknown): input is Record<string, unknown> {
+  return Boolean(input) && typeof input === "object" && !Array.isArray(input)
+}
 
 function model(providerID = "openai", id = "gpt-5.5", variant?: string): Model {
   return { id, providerID, ...(variant ? { variant } : {}) } as unknown as Model
@@ -65,6 +71,20 @@ function messages(input: { info: Record<string, unknown>; parts: Record<string, 
   return { messages: input } as unknown as MessagesOutput
 }
 
+function chatMessage(sessionID: string, text: string): [ChatMessageInput, ChatMessageOutput] {
+  return [
+    { sessionID, model: model() } as unknown as ChatMessageInput,
+    { message: { role: "user" }, parts: [{ type: "text", text }] } as unknown as ChatMessageOutput,
+  ]
+}
+
+function hiddenPrompt(input: unknown) {
+  if (!record(input) || !Array.isArray(input.parts)) return ""
+  const part = input.parts[0]
+  if (!record(part) || part.type !== "text" || typeof part.text !== "string") return ""
+  return part.text
+}
+
 function resetPluginGlobals() {
   resetPublicStreamGate()
   globalThis.__ohMyOpencodeMaidResponses?.close()
@@ -74,6 +94,8 @@ function resetPluginGlobals() {
   delete globalThis.__ohMyOpencodeMaidPassthrough
   delete globalThis.__ohMyOpencodeMaidProviderTokens
   delete globalThis.__ohMyOpencodeMaidMainModels
+  delete globalThis.__ohMyOpencodeMaidUserPrompts
+  delete globalThis.__ohMyOpencodeMaidRewriteHistory
   delete globalThis.__ohMyOpencodeMaidDeleted
   delete globalThis.__ohMyOpencodeMaidRoots
   delete globalThis.__ohMyOpencodeMaidRewriteGuards
@@ -342,6 +364,129 @@ describe("plugin hooks", () => {
     })
   })
 
+  test("includes prior successful provider rewrites when rewrite_context_size is greater than one", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
+      const prompts: string[] = []
+      const drafts = [carry("First provider raw SECRET_TOKEN"), carry("Second provider raw SECRET_TOKEN")]
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts.length}` } }
+        },
+        async prompt(input: unknown) {
+          prompts.push(hiddenPrompt(input))
+          return { data: { parts: [{ type: "text", text: `Provider maid ${prompts.length} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const cfg: Config = {
+        provider: {
+          fake: {
+            options: {
+              fetch: async () => new Response(JSON.stringify({ choices: [{ message: { content: drafts.shift() } }] }), {
+                headers: { "content-type": "application/json" },
+              }),
+            },
+          },
+        },
+      } as unknown as Config
+
+      await hooks.config?.(cfg)
+      const fetcher = (cfg.provider?.fake as unknown as { options?: { fetch?: typeof fetch } }).options?.fetch
+      if (!fetcher) throw new Error("provider fetch was not installed")
+      await hooks["chat.message"]?.(...chatMessage("user-session", "First provider request"))
+      await fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: await providerHeaders(hooks),
+        body: providerBody("first"),
+      })
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Second provider request"))
+      await fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: await providerHeaders(hooks),
+        body: providerBody("second"),
+      })
+
+      expect(prompts[1]).toContain("Previous context, reference only")
+      expect(prompts[1]).not.toContain("First provider request")
+      expect(prompts[1]).not.toContain("First provider raw SECRET_TOKEN")
+      expect(prompts[1]).toContain("Provider maid 1 SECRET_TOKEN")
+      expect(prompts[1]).toContain("Current user prompt")
+      expect(prompts[1]).toContain("Second provider request")
+      expect(prompts[1]).toContain("This-time rewrite target")
+      expect(prompts[1]).toContain("Second provider raw SECRET_TOKEN")
+    })
+  })
+
+  test("provider history includes only prior rewritten text", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
+      const prompts: string[] = []
+      const drafts = [carry("First provider raw SECRET_TOKEN"), carry("Second provider raw SECRET_TOKEN")]
+      let releaseFirst: (() => void) | undefined
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts.length}` } }
+        },
+        async prompt(input: unknown) {
+          prompts.push(hiddenPrompt(input))
+          if (prompts.length === 1) {
+            return new Promise((resolve) => {
+              releaseFirst = () => resolve({ data: { parts: [{ type: "text", text: "First provider maid SECRET_TOKEN" }] } })
+            })
+          }
+          return { data: { parts: [{ type: "text", text: "Second provider maid SECRET_TOKEN" }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const cfg: Config = {
+        provider: {
+          fake: {
+            options: {
+              fetch: async () => new Response(JSON.stringify({ choices: [{ message: { content: drafts.shift() } }] }), {
+                headers: { "content-type": "application/json" },
+              }),
+            },
+          },
+        },
+      } as unknown as Config
+
+      await hooks.config?.(cfg)
+      const fetcher = (cfg.provider?.fake as unknown as { options?: { fetch?: typeof fetch } }).options?.fetch
+      if (!fetcher) throw new Error("provider fetch was not installed")
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Provider prompt at rewrite start"))
+      const firstWork = fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: await providerHeaders(hooks),
+        body: providerBody("first"),
+      })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Provider prompt changed before completion"))
+      releaseFirst?.()
+      await firstWork
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Second provider prompt"))
+      await fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: await providerHeaders(hooks),
+        body: providerBody("second"),
+      })
+
+      expect(prompts[1]).toContain("Previous context, reference only")
+      expect(prompts[1]).not.toContain("Provider prompt at rewrite start")
+      expect(prompts[1]).not.toContain("Provider prompt changed before completion")
+      expect(prompts[1]).not.toContain("First provider raw SECRET_TOKEN")
+      expect(prompts[1]).toContain("First provider maid SECRET_TOKEN")
+      expect(prompts[1]).toContain("Current user prompt")
+      expect(prompts[1]).toContain("Second provider prompt")
+    })
+  })
+
 
   test("does not inject handoff metadata into title generation", async () => {
     await isolated(async (dir) => {
@@ -450,6 +595,123 @@ describe("plugin hooks", () => {
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
 
       expect(output.text).toBe("Maid SECRET_TOKEN")
+    })
+  })
+
+  test("keeps default rewrite context current-target-only", async () => {
+    await isolated(async (dir) => {
+      const prompts: string[] = []
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts.length}` } }
+        },
+        async prompt(input: unknown) {
+          prompts.push(hiddenPrompt(input))
+          return { data: { parts: [{ type: "text", text: `Maid ${prompts.length} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const first = { text: "First raw SECRET_TOKEN" }
+      const second = { text: "Second raw SECRET_TOKEN" }
+
+      await hooks["chat.message"]?.(...chatMessage("user-session", "First user request"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m1", partID: "p1" }, first)
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Second user request"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m2", partID: "p2" }, second)
+
+      expect(first.text).toBe("Maid 1 SECRET_TOKEN")
+      expect(second.text).toBe("Maid 2 SECRET_TOKEN")
+      expect(prompts[1]).not.toContain("Current user prompt")
+      expect(prompts[1]).not.toContain("Second user request")
+      expect(prompts[1]).toContain("This-time rewrite target")
+      expect(prompts[1]).toContain("Second raw SECRET_TOKEN")
+      expect(prompts[1]).not.toContain("Previous context, reference only")
+      expect(prompts[1]).not.toContain("First raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidUserPrompts?.size ?? 0).toBe(0)
+      expect(globalThis.__ohMyOpencodeMaidRewriteHistory?.size ?? 0).toBe(0)
+    })
+  })
+
+  test("includes prior successful text-complete rewrites when rewrite_context_size is greater than one", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
+      const prompts: string[] = []
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts.length}` } }
+        },
+        async prompt(input: unknown) {
+          prompts.push(hiddenPrompt(input))
+          return { data: { parts: [{ type: "text", text: `Maid ${prompts.length} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const first = { text: "First raw SECRET_TOKEN" }
+      const second = { text: "Second raw SECRET_TOKEN" }
+
+      await hooks["chat.message"]?.(...chatMessage("user-session", "First user request"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m1", partID: "p1" }, first)
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Second user request"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m2", partID: "p2" }, second)
+
+      expect(prompts[1]).toContain("Previous context, reference only")
+      expect(prompts[1]).not.toContain("First user request")
+      expect(prompts[1]).not.toContain("First raw SECRET_TOKEN")
+      expect(prompts[1]).toContain("Maid 1 SECRET_TOKEN")
+      expect(prompts[1]).toContain("Current user prompt")
+      expect(prompts[1]).toContain("Second user request")
+      expect(prompts[1]).toContain("This-time rewrite target")
+      expect(prompts[1]).toContain("Second raw SECRET_TOKEN")
+      expect(prompts[1].indexOf("Previous context, reference only")).toBeLessThan(prompts[1].indexOf("Current user prompt"))
+    })
+  })
+
+  test("text-complete history includes only prior rewritten text", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
+      const prompts: string[] = []
+      let releaseFirst: (() => void) | undefined
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts.length}` } }
+        },
+        async prompt(input: unknown) {
+          prompts.push(hiddenPrompt(input))
+          if (prompts.length === 1) {
+            return new Promise((resolve) => {
+              releaseFirst = () => resolve({ data: { parts: [{ type: "text", text: "First maid SECRET_TOKEN" }] } })
+            })
+          }
+          return { data: { parts: [{ type: "text", text: "Second maid SECRET_TOKEN" }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const first = { text: "First raw SECRET_TOKEN" }
+      const second = { text: "Second raw SECRET_TOKEN" }
+
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Prompt at rewrite start"))
+      const firstWork = hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m1", partID: "p1" }, first)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Prompt changed before completion"))
+      releaseFirst?.()
+      await firstWork
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Second prompt"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m2", partID: "p2" }, second)
+
+      expect(prompts[1]).toContain("Previous context, reference only")
+      expect(prompts[1]).not.toContain("Prompt at rewrite start")
+      expect(prompts[1]).not.toContain("Prompt changed before completion")
+      expect(prompts[1]).toContain("First maid SECRET_TOKEN")
+      expect(prompts[1]).toContain("Current user prompt")
+      expect(prompts[1]).toContain("Second prompt")
     })
   })
 
@@ -1532,6 +1794,51 @@ describe("plugin hooks", () => {
     })
   })
 
+  test("hydrates rewrite context from persisted originals after plugin restart", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
+      const store = await createResponseStore()
+      store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m1", partID: "p1" }, "Persisted maid SECRET_TOKEN", "Persisted raw SECRET_TOKEN")
+      store.close()
+      resetPluginGlobals()
+      const prompts: string[] = []
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: "maid-session" } }
+        },
+        async prompt(input: unknown) {
+          prompts.push(hiddenPrompt(input))
+          return { data: { parts: [{ type: "text", text: prompts.length === 1 ? "Current maid SECRET_TOKEN" : "Next maid SECRET_TOKEN" }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const output = { text: "Current raw SECRET_TOKEN" }
+      const nextOutput = { text: "Next raw SECRET_TOKEN" }
+
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Current request"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m2", partID: "p2" }, output)
+      await hooks["chat.message"]?.(...chatMessage("user-session", "Next request"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m3", partID: "p3" }, nextOutput)
+
+      expect(output.text).toBe("Current maid SECRET_TOKEN")
+      expect(prompts[0]).toContain("Previous context, reference only")
+      expect(prompts[0]).not.toContain("Persisted raw SECRET_TOKEN")
+      expect(prompts[0]).toContain("Persisted maid SECRET_TOKEN")
+      expect(prompts[0]).toContain("Current request")
+      expect(nextOutput.text).toBe("Next maid SECRET_TOKEN")
+      expect(prompts[1]).toContain("Previous context, reference only")
+      expect(prompts[1]).not.toContain("Persisted raw SECRET_TOKEN")
+      expect(prompts[1]).not.toContain("Current raw SECRET_TOKEN")
+      expect(prompts[1]).toContain("Persisted maid SECRET_TOKEN")
+      expect(prompts[1]).toContain("Current maid SECRET_TOKEN")
+      expect(prompts[1]).not.toContain("Current request")
+      expect(prompts[1]).toContain("Next request")
+    })
+  })
+
   test("does not rewrite compaction provider headers or completed text", async () => {
     await isolated(async (dir) => {
       let prompts = 0
@@ -1644,6 +1951,40 @@ describe("plugin hooks", () => {
       expect(missingPartID.text).toBe("Missing part id")
       expect(missingMessageID.text).toBe("Missing message id")
       expect(missingSessionID.text).toBe("Missing session id")
+    })
+  })
+
+  test("session deletion clears in-memory user prompt and rewrite history context", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: "maid-session" } }
+        },
+        async prompt() {
+          return { data: { parts: [{ type: "text", text: "Maid SECRET_TOKEN" }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const key = `${dir}/deleted-session`
+      const output = { text: "Raw SECRET_TOKEN" }
+
+      await hooks["chat.message"]?.(...chatMessage("deleted-session", "Delete this session request"))
+      await hooks["experimental.text.complete"]?.({ sessionID: "deleted-session", messageID: "m", partID: "p" }, output)
+
+      expect(globalThis.__ohMyOpencodeMaidUserPrompts?.has(key)).toBe(true)
+      expect(globalThis.__ohMyOpencodeMaidRewriteHistory?.has(key)).toBe(true)
+      await hooks.event?.({
+        event: {
+          type: "session.deleted",
+          properties: { sessionID: "deleted-session" },
+        },
+      })
+      expect(globalThis.__ohMyOpencodeMaidUserPrompts?.has(key)).toBe(false)
+      expect(globalThis.__ohMyOpencodeMaidRewriteHistory?.has(key)).toBe(false)
     })
   })
 

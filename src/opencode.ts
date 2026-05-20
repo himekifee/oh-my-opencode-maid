@@ -2,7 +2,7 @@ import type { PluginInput } from "@opencode-ai/plugin"
 import { OpencodeClient as OpencodeClientV2 } from "@opencode-ai/sdk/v2/client"
 import type { Client as ClientV2 } from "@opencode-ai/sdk/v2/gen/client"
 import { FALLBACK_MODEL, MAIN_AGENT_MODEL, type MaidConfig } from "./config"
-import type { HandoffNote } from "./rewrite"
+import type { HandoffNote, RewriteContextEntry } from "./rewrite"
 import { maidUserPrompt } from "./rewrite"
 
 export const REWRITE_AGENT = "roleplay_rewrite"
@@ -208,6 +208,8 @@ export async function runMaid(input: {
   cfg: MaidConfig
   text: string
   note?: HandoffNote
+  currentUserPrompt?: string
+  previousContext?: RewriteContextEntry[]
   parentID?: string
   hidden: Set<string>
   model?: ModelSpec

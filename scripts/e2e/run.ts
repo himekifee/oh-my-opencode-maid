@@ -22,6 +22,8 @@ import {
   REWRITE_VARIANT,
   REWRITTEN_TEXT,
   ROLEPLAY_SENTINEL,
+  SECOND_RAW_DRAFT,
+  SECOND_USER_TASK,
   SMALL_CONTEXT_MODEL,
   USER_TASK,
   VARIANT_WIRE_SENTINEL,
@@ -132,6 +134,7 @@ async function main() {
           enabled: true,
           model: `${PROVIDER_ID}/${REWRITE_MODEL}`,
           variant: REWRITE_VARIANT,
+          rewrite_context_size: 3,
           roleplay_prompt: `${ROLEPLAY_SENTINEL} Rewrite the assistant reply faithfully; keep every token, path and number.`,
         },
         null,
@@ -209,8 +212,16 @@ async function main() {
     )
 
     const sessionID = rootSessionID(run.stderr)
+    let contextRun: Awaited<ReturnType<typeof sh>> | undefined
     let compactRun: Awaited<ReturnType<typeof sh>> | undefined
     if (sessionID) {
+      process.stdout.write("· running opencode context continuation\n")
+      contextRun = await sh(
+        OPENCODE_BIN,
+        ["run", "--dir", project, "--session", sessionID, "--model", `${PROVIDER_ID}/${MAIN_MODEL}`, "--print-logs", SECOND_USER_TASK],
+        { cwd: project, env, timeoutMs: RUN_TIMEOUT_MS },
+      )
+
       process.stdout.write("· running opencode compaction trigger\n")
       compactRun = await sh(
         OPENCODE_BIN,
@@ -234,6 +245,7 @@ async function main() {
 
     if (process.env.E2E_DEBUG) {
       process.stdout.write(`\n----- opencode stderr -----\n${run.stderr}\n`)
+      if (contextRun) process.stdout.write(`----- context continuation stderr -----\n${contextRun.stderr}\n`)
       if (compactRun) process.stdout.write(`----- compaction trigger stderr -----\n${compactRun.stderr}\n`)
       process.stdout.write(`----- session ${sessionID ?? "(none)"} visible assistant text -----\n${visible}\n`)
       process.stdout.write(`----- fake requests -----\n${JSON.stringify(fake.requests, null, 2)}\n`)
@@ -242,6 +254,11 @@ async function main() {
     // 7. Assertions.
     check("opencode exited cleanly", run.code === 0 && !run.timedOut, `code=${run.code} timedOut=${run.timedOut}`)
     check("a root session was created", Boolean(sessionID), "no root session id in opencode logs")
+    check(
+      "context continuation exited cleanly",
+      contextRun !== undefined && contextRun.code === 0 && !contextRun.timedOut,
+      `code=${contextRun?.code} timedOut=${contextRun?.timedOut}`,
+    )
     check(
       "compaction trigger exited cleanly",
       compactRun !== undefined && compactRun.code === 0 && !compactRun.timedOut,
@@ -252,10 +269,10 @@ async function main() {
     const smallReqs = fake.smallMainRequests()
     const compactionReqs = fake.compactionRequests()
     const rewriteReqs = fake.rewriteRequests()
-    check("fake provider got the main agent turn", mainReqs.length >= 1, `main requests=${mainReqs.length}`)
+    check("fake provider got both main agent turns", mainReqs.length >= 2, `main requests=${mainReqs.length}`)
     check("fake provider got the small-context continuation", smallReqs.length >= 1, `small-context requests=${smallReqs.length}`)
     check("fake provider got the compaction turn", compactionReqs.length >= 1, `compaction requests=${compactionReqs.length}`)
-    check("fake provider got the hidden rewrite turn", rewriteReqs.length >= 1, `rewrite requests=${rewriteReqs.length}`)
+    check("fake provider got repeated hidden rewrite turns", rewriteReqs.length >= 2, `rewrite requests=${rewriteReqs.length}`)
 
     if (mainReqs.length) {
       check(
@@ -299,6 +316,24 @@ async function main() {
         rewriteReqs.every((r) => r.hasVariantSentinel),
         "VARIANT_WIRE_SENTINEL absent from a rewrite request body",
       )
+      const secondRewrite = rewriteReqs[1]
+      check("fake provider got the context rewrite turn", Boolean(secondRewrite), `rewrite requests=${rewriteReqs.length}`)
+      check(
+        "context rewrite received previous rewritten text without previous raw text",
+        Boolean(secondRewrite
+          && secondRewrite.rawBody.includes("Previous context, reference only")
+          && secondRewrite.rawBody.includes(REWRITTEN_TEXT)
+          && !secondRewrite.rawBody.includes(RAW_DRAFT)),
+        "second rewrite body did not include rewritten-only prior context",
+      )
+      check(
+        "context rewrite received the current continuation prompt",
+        Boolean(secondRewrite
+          && secondRewrite.rawBody.includes("Current user prompt")
+          && secondRewrite.rawBody.includes(SECOND_USER_TASK)
+          && secondRewrite.rawBody.includes(SECOND_RAW_DRAFT)),
+        "second rewrite body did not include current user prompt",
+      )
       check(
         "compaction summary was not sent to hidden rewrite",
         rewriteReqs.every((r) => !r.hasCompactionSummary),
@@ -313,7 +348,7 @@ async function main() {
     )
     check(
       "raw draft never became the visible reply",
-      visible.length > 0 && !visible.includes(RAW_DRAFT),
+      visible.length > 0 && !visible.includes(RAW_DRAFT) && !visible.includes(SECOND_RAW_DRAFT),
       "RAW_DRAFT leaked into the visible reply (rewrite did not take over)",
     )
 

@@ -21,6 +21,7 @@ export const ROLEPLAY_SENTINEL = "E2E_ROLEPLAY_SENTINEL_b91c"
 
 // The user turn we send to `opencode run`.
 export const USER_TASK = "E2E_USER_TASK_q42: reply with the raw draft exactly."
+export const SECOND_USER_TASK = "E2E_SECOND_USER_TASK_m31: continue and reply with the raw draft exactly."
 export const COMPACTION_TRIGGER_MARKER = "E2E_COMPACTION_TRIGGER_c85d"
 export const COMPACTION_TRIGGER_TASK = `${COMPACTION_TRIGGER_MARKER}: continue the same session and reply with the raw draft exactly. ${Array.from({ length: 900 }, (_, i) => `ctx${i}`).join(" ")}`
 
@@ -28,6 +29,7 @@ export const COMPACTION_TRIGGER_TASK = `${COMPACTION_TRIGGER_MARKER}: continue t
 // plugin must intercept and hand to the rewrite agent).
 export const RAW_TOKEN = "TOKEN_KEEP_9173"
 export const RAW_DRAFT = `RAW_DRAFT::do-not-show-this-verbatim::${RAW_TOKEN}`
+export const SECOND_RAW_DRAFT = `SECOND_TURN_DRAFT::do-not-show-this-verbatim::${RAW_TOKEN}`
 
 // What the fake provider returns for the *rewrite* agent turn (the only thing
 // the user should ever see). Carries RAW_TOKEN so we also exercise preservation.

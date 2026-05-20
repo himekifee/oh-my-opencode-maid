@@ -6,6 +6,7 @@ import { z } from "zod"
 export const MAIN_AGENT_MODEL = "main-agent-model"
 export const FALLBACK_MODEL = "openai/gpt-5.5"
 export const DEFAULT_MODEL = MAIN_AGENT_MODEL
+export const REWRITE_CONTEXT_MAX = 20
 
 const providerModel = /^[^/\s]+\/.+$/
 
@@ -20,12 +21,14 @@ const Schema = z
     model: Model.optional(),
     variant: z.string().min(1).optional(),
     roleplay_prompt: z.string().min(1).optional(),
+    rewrite_context_size: z.number().int().min(1).max(REWRITE_CONTEXT_MAX).optional(),
   })
   .strict()
 
 const Loaded = Schema.extend({
   enabled: z.boolean(),
   model: Model,
+  rewrite_context_size: z.number().int().min(1).max(REWRITE_CONTEXT_MAX),
   roleplay_prompt: z.string().min(1),
 })
 
@@ -42,6 +45,7 @@ type MainConfig = {
 const defaults = {
   enabled: true,
   model: DEFAULT_MODEL,
+  rewrite_context_size: 1,
   roleplay_prompt:
     "Rewrite the assistant reply in English as Yuzuki, a cheerful and attentive maid assistant: gentle, courteous, precise, logically organized, quietly warm, and modest about limitations. Always call me master. Preserve facts, code, commands, paths, URLs, identifiers, numbers, markdown structure, and the user's requested meaning.",
 }

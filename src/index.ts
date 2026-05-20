@@ -1,8 +1,8 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
-import { MAIN_AGENT_MODEL, applyMainConfig, loadConfig } from "./config"
-import { FAILURE, finalResult, HANDOFF, handoffSystemPrompt, maidAgentPrompt, split, type FinalTextResult } from "./rewrite"
+import { MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig } from "./config"
+import { FAILURE, finalResult, HANDOFF, handoffSystemPrompt, maidAgentPrompt, split, type FinalTextResult, type RewriteContextEntry } from "./rewrite"
 import { REWRITE_AGENT, SESSION_META_LOOKUP_FAILED, createDeltaSuppressor, disabledTools, formatModel, getSessionMeta, resolveModel, runMaid, type ModelSpec, type SessionMeta } from "./opencode"
 import { PROVIDER_REWRITE_HEADER, createProviderFetch, installProviderRewrite, installPublicStreamGate, uninstallProviderRewrite, uninstallPublicStreamGate } from "./patch"
 import { createResponseStore, type PendingProviderOriginal, type ResponseKey, type ResponseStore, type SessionOriginal } from "./responses"
@@ -26,6 +26,8 @@ declare global {
   var __ohMyOpencodeMaidPassthrough: Set<string> | undefined
   var __ohMyOpencodeMaidProviderTokens: Map<string, string> | undefined
   var __ohMyOpencodeMaidMainModels: Map<string, ModelSpec> | undefined
+  var __ohMyOpencodeMaidUserPrompts: Map<string, string> | undefined
+  var __ohMyOpencodeMaidRewriteHistory: Map<string, RewriteContextEntry[]> | undefined
   var __ohMyOpencodeMaidDeleted: Set<string> | undefined
   var __ohMyOpencodeMaidRoots: Set<string> | undefined
   var __ohMyOpencodeMaidRewriteGuards: Set<string> | undefined
@@ -74,6 +76,30 @@ function stringField(input: unknown, field: string) {
   if (!record(input)) return undefined
   const value = input[field]
   return typeof value === "string" ? value : undefined
+}
+
+function cleanPromptText(text: string | undefined) {
+  const out = text?.trim()
+  return out ? out : undefined
+}
+
+function promptFromParts(parts: unknown) {
+  if (!Array.isArray(parts)) return undefined
+  const texts: string[] = []
+  for (const part of parts) {
+    if (!record(part) || part.type !== "text" || typeof part.text !== "string") continue
+    const text = cleanPromptText(part.text)
+    if (text) texts.push(text)
+  }
+  return cleanPromptText(texts.join("\n"))
+}
+
+function promptFromMessage(message: unknown) {
+  if (!record(message)) return undefined
+  return promptFromParts(message.parts)
+    ?? cleanPromptText(stringField(message, "text"))
+    ?? cleanPromptText(stringField(message, "content"))
+    ?? cleanPromptText(stringField(message, "prompt"))
 }
 
 function modelFromInput(model: unknown, variant?: unknown): ModelSpec | undefined {
@@ -172,6 +198,8 @@ const MaidPlugin: Plugin = async (ctx) => {
   const passthrough = globalThis.__ohMyOpencodeMaidPassthrough ??= new Set<string>()
   const providerTokens = globalThis.__ohMyOpencodeMaidProviderTokens ??= new Map<string, string>()
   const mainModels = globalThis.__ohMyOpencodeMaidMainModels ??= new Map<string, ModelSpec>()
+  const userPrompts = globalThis.__ohMyOpencodeMaidUserPrompts ??= new Map<string, string>()
+  const rewriteHistory = globalThis.__ohMyOpencodeMaidRewriteHistory ??= new Map<string, RewriteContextEntry[]>()
   const deleted = globalThis.__ohMyOpencodeMaidDeleted ??= new Set<string>()
   const roots = globalThis.__ohMyOpencodeMaidRoots ??= new Set<string>()
   const rewriteGuards = globalThis.__ohMyOpencodeMaidRewriteGuards ??= new Set<string>()
@@ -209,6 +237,57 @@ const MaidPlugin: Plugin = async (ctx) => {
   const sessionID = (meta: SessionMeta, fallback?: string) => meta.sessionID ?? meta.id ?? fallback
   const isGuardedRewrite = (id: string) => hidden.has(id) || rewriteGuards.has(id)
   const isRewriteSession = (id: string, meta: SessionMeta) => hidden.has(id) || (meta.agent === REWRITE_AGENT && meta.title === "Roleplay rewrite")
+  const clearPromptContextForSession = (id: string) => {
+    userPrompts.delete(sessionKey(id))
+    rewriteHistory.delete(sessionKey(id))
+  }
+  const rememberUserPrompt = (id: string | undefined, ...sources: unknown[]) => {
+    if (cfg.rewrite_context_size <= 1 || !id || isDeletedSession(id) || isGuardedRewrite(id) || passthrough.has(id) || isCompacting(id)) return
+    for (const source of sources) {
+      const text = promptFromParts(source) ?? promptFromMessage(source)
+      if (text) {
+        userPrompts.set(sessionKey(id), text)
+        return
+      }
+    }
+  }
+  const previousRewriteContext = (id: string | undefined) => {
+    if (!id || cfg.rewrite_context_size <= 1 || isDeletedSession(id) || isGuardedRewrite(id) || passthrough.has(id) || isCompacting(id)) return undefined
+    const limit = cfg.rewrite_context_size - 1
+    const history = rewriteHistory.get(sessionKey(id))
+    const remembered = history?.slice(-limit)
+    const entries: RewriteContextEntry[] = []
+    const pushEntry = (entry: RewriteContextEntry) => {
+      const index = entries.findIndex((item) => item.originalText === entry.originalText && item.visibleText === entry.visibleText)
+      if (index >= 0) entries.splice(index, 1)
+      entries.push(entry)
+    }
+    try {
+      const originals = responses?.getSessionOriginals(ctx.directory, id, limit) ?? []
+      for (const item of originals) pushEntry({
+        originalText: item.originalText,
+        visibleText: item.visibleText,
+      })
+    } catch {
+      // Persisted context is best-effort; in-memory history is still usable.
+    }
+    for (const entry of remembered ?? []) pushEntry(entry)
+    const out = entries.slice(-limit)
+    return out.length ? out : undefined
+  }
+  const currentPromptContext = (id: string | undefined) => {
+    if (cfg.rewrite_context_size <= 1 || !id || isDeletedSession(id) || isGuardedRewrite(id) || passthrough.has(id) || isCompacting(id)) return undefined
+    return userPrompts.get(sessionKey(id))
+  }
+  const rememberSuccessfulRewrite = (id: string | undefined, originalText: string, visibleText: string, userPrompt?: string) => {
+    if (cfg.rewrite_context_size <= 1 || !id || isDeletedSession(id) || isGuardedRewrite(id) || passthrough.has(id) || isCompacting(id)) return
+    const entry: RewriteContextEntry = {
+      ...(userPrompt ? { userPrompt } : {}),
+      originalText,
+      visibleText,
+    }
+    rewriteHistory.set(sessionKey(id), [...(rewriteHistory.get(sessionKey(id)) ?? []), entry].slice(-(REWRITE_CONTEXT_MAX - 1)))
+  }
   const rememberSession = (meta: SessionMeta | undefined, fallback?: string, removed = false) => {
     const id = meta ? sessionID(meta, fallback) : fallback
     if (!id) return
@@ -222,6 +301,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       deleteCompletedForSession(id)
       deletePendingForSession(id)
       mainModels.delete(sessionKey(id))
+      clearPromptContextForSession(id)
       try {
         responses?.deleteSession(ctx.directory, id)
       } catch {
@@ -322,7 +402,7 @@ const MaidPlugin: Plugin = async (ctx) => {
     return false
   }
   const replayMatches = (replay: CompletedReplay, text: string) => replay.originalText === text || replay.visibleText === text
-  const rewrite = async (draft: string, parentID?: string) => {
+  const rewrite = async (draft: string, parentID?: string, capturedUserPrompt = currentPromptContext(parentID)) => {
     const item = split(draft)
     if (!item.text) return { text: item.text, rewritten: false }
     if (item.text.length > MAX_DRAFT) return { text: item.text, rewritten: false }
@@ -336,6 +416,8 @@ const MaidPlugin: Plugin = async (ctx) => {
             cfg,
             text: item.text,
             note: item.note,
+            currentUserPrompt: capturedUserPrompt,
+            previousContext: previousRewriteContext(parentID),
             parentID,
             hidden,
             model: rewriteModel(parentID),
@@ -348,13 +430,16 @@ const MaidPlugin: Plugin = async (ctx) => {
   }
   const providerRewrite = async (draft: string, sessionID?: string) => {
     const original = split(draft).text
-    const result = await rewrite(draft, sessionID)
+    if (!sessionID || isDeletedSession(sessionID) || isGuardedRewrite(sessionID) || isCompacting(sessionID) || await isPassthrough(sessionID) || isDeletedSession(sessionID)) return original
+    const capturedUserPrompt = currentPromptContext(sessionID)
+    const result = await rewrite(draft, sessionID, capturedUserPrompt)
     const visible = result.rewritten ? result.text : original
     try {
       rememberProviderOriginal(sessionID, visible, original, !result.rewritten)
     } catch {
       return DISPLAY_ONLY_FALLBACK
     }
+    if (result.rewritten) rememberSuccessfulRewrite(sessionID, original, visible, capturedUserPrompt)
     return visible
   }
   const hook = {
@@ -408,15 +493,17 @@ const MaidPlugin: Plugin = async (ctx) => {
       suppress(input.event)
     },
 
-    "chat.message": async (input) => {
+    "chat.message": async (input, output) => {
       if (!cfg.enabled) return
       if (await skipSession(input.sessionID)) return
+      rememberUserPrompt(input.sessionID, output?.parts, output?.message, input)
       rememberMainModel(input.sessionID, input.model, input.variant)
     },
 
     "chat.params": async (input) => {
       if (!cfg.enabled) return
       if (await skipSession(input.sessionID)) return
+      rememberUserPrompt(input.sessionID, input.message)
       rememberMainModel(input.sessionID, input.model, stringField(input, "variant"))
     },
 
@@ -426,6 +513,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       if (isGuardedRewrite(input.sessionID)) return
       if (isCompacting(input.sessionID)) return
       if (rewriteScope.getStore() === true) return
+      rememberUserPrompt(input.sessionID, input.message)
       rememberMainModel(input.sessionID, input.model, stringField(input, "variant"))
       output.headers[PROVIDER_REWRITE_HEADER] = issueProviderToken(input.sessionID)
     },
@@ -566,7 +654,8 @@ const MaidPlugin: Plugin = async (ctx) => {
         return
       }
       let entry: PendingRewrite | undefined
-      const work = rewrite(output.text, input.sessionID)
+      const capturedUserPrompt = currentPromptContext(input.sessionID)
+      const work = rewrite(output.text, input.sessionID, capturedUserPrompt)
         .then((result) => {
           if (!entry || pending.get(done) !== entry) return result
           if (result.rewritten) {
@@ -575,6 +664,7 @@ const MaidPlugin: Plugin = async (ctx) => {
             } catch {
               return { text: FAILURE, rewritten: false }
             }
+            rememberSuccessfulRewrite(input.sessionID, item.text, result.text, capturedUserPrompt)
             completed.set(done, { originalText: item.text, visibleText: result.text })
           } else {
             try {

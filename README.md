@@ -111,6 +111,7 @@ On startup the plugin seeds a global user config at
   "enabled": true,
   "model": "main-agent-model",
   // "variant": "optional-provider-variant-for-concrete-models",
+  "rewrite_context_size": 1,
   "roleplay_prompt": "Rewrite the assistant reply in English as Yuzuki, a cheerful and attentive maid assistant: gentle, courteous, precise, logically organized, quietly warm, and modest about limitations. Always call me master. Preserve facts, code, commands, paths, URLs, identifiers, numbers, markdown structure, and the user's requested meaning."
 }
 ```
@@ -120,6 +121,7 @@ On startup the plugin seeds a global user config at
 | `enabled` | `true` | Master switch. When on, all interception monkey patches are installed. |
 | `model` | `main-agent-model` | Sentinel: each hidden rewrite uses the same provider/model/variant as the active main session. Falls back to `openai/gpt-5.5` if no main model has been captured yet. May also be a concrete `provider/model`. |
 | `variant` | — | Passed to the hidden rewrite agent **only for concrete models**. With `main-agent-model`, the captured main-session variant is used instead. |
+| `rewrite_context_size` | `1` | Number of rewrite turns included in each hidden rewrite prompt, from `1` to `20`. `1` sends only the current rewrite target; higher values add the current user prompt plus previous successful rewrites from the same root session as reference-only context. |
 | `roleplay_prompt` | *Yuzuki maid persona* | Followed exactly by the rewrite agent. This is where the magic lives. |
 
 There are no separate endpoint, secret, deadline, canned-response, or invasive toggle settings.

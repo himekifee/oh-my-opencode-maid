@@ -5,6 +5,7 @@ import { HANDOFF, finalResult, finalText, handoffSystemPrompt, maidAgentPrompt, 
 const cfg: MaidConfig = {
   enabled: true,
   model: "openai/gpt-5.5",
+  rewrite_context_size: 1,
   roleplay_prompt: "configured voice",
 }
 
@@ -71,6 +72,40 @@ describe("rewrite helpers", () => {
     expect(maidAgentPrompt(cfg)).not.toContain("You are Maid")
     expect(maidUserPrompt({ cfg, text: "Draft SECRET_TOKEN", note: note() })).toContain("Draft SECRET_TOKEN")
     expect(maidUserPrompt({ cfg, text: "Draft SECRET_TOKEN", note: note() })).not.toContain("You are Maid")
+  })
+
+  test("default rewrite prompt labels only the current target without context", () => {
+    const prompt = maidUserPrompt({ cfg, text: "Current draft SECRET_TOKEN" })
+
+    expect(prompt).not.toContain("Previous context, reference only")
+    expect(prompt).not.toContain("Current user prompt")
+    expect(prompt).not.toContain("Current user prompt\n\nnone supplied")
+    expect(prompt).toContain("This-time rewrite target")
+    expect(prompt).toContain("Current draft SECRET_TOKEN")
+  })
+
+  test("labels current prompt when context mode passes one", () => {
+    const prompt = maidUserPrompt({ cfg, text: "Current draft SECRET_TOKEN", currentUserPrompt: "Current request" })
+
+    expect(prompt).toContain("Current user prompt")
+    expect(prompt).toContain("Current request")
+    expect(prompt).toContain("This-time rewrite target")
+  })
+
+  test("includes previous rewrite context as reference-only before the current target", () => {
+    const prompt = maidUserPrompt({
+      cfg,
+      text: "Current draft SECRET_TOKEN",
+      currentUserPrompt: "Current request",
+      previousContext: [{ userPrompt: "Previous request", originalText: "Previous raw SECRET_TOKEN", visibleText: "Previous maid SECRET_TOKEN" }],
+    })
+
+    expect(prompt).toContain("Previous context, reference only")
+    expect(prompt).not.toContain("Previous request")
+    expect(prompt).not.toContain("Previous raw SECRET_TOKEN")
+    expect(prompt).toContain("Previous maid SECRET_TOKEN")
+    expect(prompt.indexOf("Previous context, reference only")).toBeLessThan(prompt.indexOf("Current user prompt"))
+    expect(prompt.indexOf("Current user prompt")).toBeLessThan(prompt.indexOf("This-time rewrite target"))
   })
 
   test("source has no dedicated chat completions or static response assumptions", async () => {

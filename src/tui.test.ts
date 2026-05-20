@@ -37,7 +37,7 @@ type FakeApi = Parameters<typeof tuiModule.tui>[0]
 type FakeRuntime = {
   api: FakeApi
   dialogs: string[]
-  toasts: { message: string; title?: string; variant?: string }[]
+  toasts: { message: string; title?: string; variant?: string; duration?: number }[]
   sizes: string[]
   handlers: Record<string, EventHandler>
   commands: Command[]
@@ -71,7 +71,7 @@ async function isolated<T>(fn: (dir: string) => Promise<T>) {
 
 function fakeApi(directory: string): FakeRuntime {
   const dialogs: string[] = []
-  const toasts: { message: string; title?: string; variant?: string }[] = []
+  const toasts: { message: string; title?: string; variant?: string; duration?: number }[] = []
   const sizes: string[] = []
   const handlers: Record<string, EventHandler> = {}
   const commands: Command[] = []
@@ -359,9 +359,10 @@ describe("tui fallback display", () => {
 
   afterEach(resetPluginGlobals)
 
-  test("default export is a TUI module without a named tui export", async () => {
+  test("default export is a TUI module with a stable id and without a named tui export", async () => {
     const exports = await import("./tui")
 
+    expect(tuiModule).toHaveProperty("id", "oh-my-opencode-maid")
     expect(tuiModule).toHaveProperty("tui")
     expect("tui" in exports).toBe(false)
   })
@@ -430,10 +431,21 @@ describe("tui fallback display", () => {
       runtime.parts.m = [{ id: "p", sessionID: "user-session", messageID: "m", type: "text", text: DISPLAY_ONLY_FALLBACK, time: { start: 1, end: 2 } }]
 
       await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
-      await runtime.commands[0]?.onSelect?.()
+      await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
 
-      expect(runtime.commands[0]?.slash?.name).toBe("maid-original")
+      expect(runtime.commands.find((command) => command.slash?.name === "maid-original")?.slash?.name).toBe("maid-original")
       expect(runtime.dialogs).toEqual(["Command raw SECRET_TOKEN"])
+      await runtime.dispose?.()
+    })
+  })
+
+  test("does not register the server-owned rewrite toggle command", async () => {
+    await isolated(async (dir) => {
+      const runtime = fakeApi(dir)
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+
+      expect(runtime.commands.map((command) => command.slash?.name)).toEqual(["maid-original"])
       await runtime.dispose?.()
     })
   })

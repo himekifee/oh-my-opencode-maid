@@ -126,6 +126,8 @@ On startup the plugin seeds a global user config at
 
 There are no separate endpoint, secret, deadline, canned-response, or invasive toggle settings.
 
+The server plugin registers `/maid-rewrite-toggle`. Running it flips the persisted global `enabled` config, applies the new state immediately in the current OpenCode server process, and shows a status toast. OpenCode still treats custom slash commands as prompt turns, so the command may also produce a short command-result assistant message after the toast; the runtime toggle has already happened before that response.
+
 ## 🎭 The default persona — Yuzuki
 
 The shipped `roleplay_prompt` turns the assistant into **Yuzuki**: cheerful, attentive, courteous, logically organized, quietly warm, modest about limitations — and she **always calls you `master`**, a nod to the devoted persocom maid from *Chobits*.
@@ -164,7 +166,7 @@ bun run typecheck
 bun run build
 ```
 
-Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, legacy fallback rows should open a local dialog with the sidecar original, and `/maid-original` should reopen it without changing session history.
+Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled` and showing the matching status toast. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, legacy fallback rows should open a local dialog with the sidecar original, and `/maid-original` should reopen it without changing session history.
 
 ## 📜 License
 

@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { parse } from "jsonc-parser"
+import { applyEdits, modify, parse } from "jsonc-parser"
 import { z } from "zod"
 
 export const MAIN_AGENT_MODEL = "main-agent-model"
@@ -54,13 +54,17 @@ const CONFIG_FILE = "oh-my-opencode-maid.jsonc"
 
 const explicit = new WeakMap<MaidConfig, PartialMaidConfig>()
 
+function parseJsonc(text: string, file: string) {
+  const errors: import("jsonc-parser").ParseError[] = []
+  const data = parse(text, errors, { allowTrailingComma: true })
+  if (errors.length) throw new Error(`Invalid JSONC in ${file}: ${errors.map((err) => err.error).join(", ")}`)
+  return data
+}
+
 async function readJsonc(file: string) {
   const item = Bun.file(file)
   if (!(await item.exists())) return undefined
-  const errors: import("jsonc-parser").ParseError[] = []
-  const data = parse(await item.text(), errors, { allowTrailingComma: true })
-  if (errors.length) throw new Error(`Invalid JSONC in ${file}: ${errors.map((err) => err.error).join(", ")}`)
-  return data
+  return parseJsonc(await item.text(), file)
 }
 
 async function read(file: string): Promise<PartialMaidConfig> {
@@ -73,7 +77,7 @@ function configHome() {
   return process.env.XDG_CONFIG_HOME ?? path.join(process.env.HOME ?? "", ".config")
 }
 
-function userConfigPath() {
+export function userConfigPath() {
   return path.join(configHome(), "opencode", CONFIG_FILE)
 }
 
@@ -163,4 +167,21 @@ export async function loadConfig(dir: string): Promise<MaidConfig> {
   else if (override.model && !override.variant) delete cfg.variant
   explicit.set(cfg, override)
   return cfg
+}
+
+export async function toggleRewriteEnabled() {
+  const userFile = userConfigPath()
+  await seedUserConfig(userFile)
+  const text = await Bun.file(userFile).text()
+  const user = Schema.parse(parseJsonc(text, userFile))
+  const enabled = !(user.enabled ?? defaults.enabled)
+  const next = applyEdits(text, modify(text, ["enabled"], enabled, {
+    formattingOptions: {
+      eol: "\n",
+      insertSpaces: true,
+      tabSize: 2,
+    },
+  }))
+  await writeFile(userFile, next, { mode: 0o600 })
+  return { enabled, path: userFile }
 }

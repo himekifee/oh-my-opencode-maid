@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { randomUUID } from "node:crypto"
-import { MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig } from "./config"
+import { MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig, toggleRewriteEnabled } from "./config"
 import { FAILURE, finalResult, HANDOFF, handoffSystemPrompt, maidAgentPrompt, split, type FinalTextResult, type RewriteContextEntry } from "./rewrite"
 import { REWRITE_AGENT, SESSION_META_LOOKUP_FAILED, createDeltaSuppressor, disabledTools, formatModel, getSessionMeta, resolveModel, runMaid, type ModelSpec, type SessionMeta } from "./opencode"
 import { PROVIDER_REWRITE_HEADER, createProviderFetch, installProviderRewrite, installPublicStreamGate, uninstallProviderRewrite, uninstallPublicStreamGate } from "./patch"
@@ -10,7 +10,21 @@ import { DISPLAY_ONLY_FALLBACK } from "./fallback"
 
 type MutableConfig = {
   agent?: Record<string, unknown>
+  command?: Record<string, {
+    template: string
+    description?: string
+    agent?: string
+    model?: string
+    subtask?: boolean
+  }>
   provider?: Record<string, unknown>
+}
+
+type ServerToast = {
+  variant: "info" | "success" | "warning" | "error"
+  title?: string
+  message: string
+  duration?: number
 }
 
 type RewritePartKey = {
@@ -24,7 +38,7 @@ declare global {
   var __ohMyOpencodeMaidCompleted: Map<string, CompletedReplay> | undefined
   var __ohMyOpencodeMaidPending: Map<string, PendingRewrite> | undefined
   var __ohMyOpencodeMaidPassthrough: Set<string> | undefined
-  var __ohMyOpencodeMaidProviderTokens: Map<string, string> | undefined
+  var __ohMyOpencodeMaidProviderTokens: Map<string, ProviderToken> | undefined
   var __ohMyOpencodeMaidMainModels: Map<string, ModelSpec> | undefined
   var __ohMyOpencodeMaidUserPrompts: Map<string, string> | undefined
   var __ohMyOpencodeMaidRewriteHistory: Map<string, RewriteContextEntry[]> | undefined
@@ -34,6 +48,7 @@ declare global {
   var __ohMyOpencodeMaidCompacting: Map<string, ReturnType<typeof setTimeout>> | undefined
   var __ohMyOpencodeMaidResponses: ResponseStore | undefined
   var __ohMyOpencodeMaidRewriteScope: AsyncLocalStorage<boolean> | undefined
+  var __ohMyOpencodeMaidEnabled: Map<string, boolean> | undefined
 }
 
 type CompletedReplay = {
@@ -44,6 +59,11 @@ type CompletedReplay = {
 type PendingRewrite = {
   originalText: string
   promise: Promise<FinalTextResult>
+}
+
+type ProviderToken = {
+  directory: string
+  sessionID: string
 }
 
 const permission = {
@@ -63,6 +83,7 @@ const MAX_DRAFT = 200_000
 const MAX_COMPACTION_ORIGINALS = 50
 const MAX_COMPACTION_ORIGINAL_CHARS = 8_000
 const PROVIDER_TOKEN_TTL = 10 * 60 * 1000
+const TOGGLE_COMMAND = "maid-rewrite-toggle"
 
 function record(input: unknown): input is Record<string, unknown> {
   return Boolean(input) && typeof input === "object" && !Array.isArray(input)
@@ -191,12 +212,12 @@ function compactionContext(originals: SessionOriginal[]) {
 
 const MaidPlugin: Plugin = async (ctx) => {
   const cfg = await loadConfig(ctx.directory)
-  const responses = cfg.enabled ? (globalThis.__ohMyOpencodeMaidResponses ??= await createResponseStore().catch(() => undefined)) : undefined
+  let responses = cfg.enabled ? (globalThis.__ohMyOpencodeMaidResponses ??= await createResponseStore().catch(() => undefined)) : undefined
   const hidden = globalThis.__ohMyOpencodeMaidHidden ??= new Set<string>()
   const completed = completedStore()
   const pending = globalThis.__ohMyOpencodeMaidPending ??= new Map<string, PendingRewrite>()
   const passthrough = globalThis.__ohMyOpencodeMaidPassthrough ??= new Set<string>()
-  const providerTokens = globalThis.__ohMyOpencodeMaidProviderTokens ??= new Map<string, string>()
+  const providerTokens = globalThis.__ohMyOpencodeMaidProviderTokens ??= new Map<string, ProviderToken>()
   const mainModels = globalThis.__ohMyOpencodeMaidMainModels ??= new Map<string, ModelSpec>()
   const userPrompts = globalThis.__ohMyOpencodeMaidUserPrompts ??= new Map<string, string>()
   const rewriteHistory = globalThis.__ohMyOpencodeMaidRewriteHistory ??= new Map<string, RewriteContextEntry[]>()
@@ -205,11 +226,18 @@ const MaidPlugin: Plugin = async (ctx) => {
   const rewriteGuards = globalThis.__ohMyOpencodeMaidRewriteGuards ??= new Set<string>()
   const compacting = globalThis.__ohMyOpencodeMaidCompacting ??= new Map<string, ReturnType<typeof setTimeout>>()
   const rewriteScope = globalThis.__ohMyOpencodeMaidRewriteScope ??= new AsyncLocalStorage<boolean>()
+  const enabled = globalThis.__ohMyOpencodeMaidEnabled ??= new Map<string, boolean>()
+  enabled.set(ctx.directory, cfg.enabled)
   const suppress = createDeltaSuppressor(hidden, passthrough)
   let baseFetch = globalThis.fetch
-  if (!cfg.enabled) {
-    uninstallProviderRewrite(ctx.directory)
-    uninstallPublicStreamGate(ctx.directory)
+  const isEnabled = () => enabled.get(ctx.directory) ?? cfg.enabled
+  const ensureResponses = async () => {
+    if (!responses) {
+      const store = globalThis.__ohMyOpencodeMaidResponses ?? await createResponseStore().catch(() => undefined)
+      if (store) globalThis.__ohMyOpencodeMaidResponses = store
+      responses = store
+    }
+    return responses
   }
   const sessionKey = (sessionID: string) => `${ctx.directory}/${sessionID}`
   const clearCompacting = (sessionID: string) => {
@@ -330,6 +358,13 @@ const MaidPlugin: Plugin = async (ctx) => {
     if (!learned) return
     rememberSession(learned.meta, learned.sessionID, learned.deleted)
   }
+  const forgetDeletedSession = async (event: unknown) => {
+    const learned = eventSession(event)
+    if (!learned?.deleted) return false
+    await ensureResponses()
+    rememberSession(learned.meta, learned.sessionID, true)
+    return true
+  }
   const isPassthrough = async (id: string) => {
     if (isGuardedRewrite(id)) return false
     if (passthrough.has(id)) return true
@@ -359,7 +394,7 @@ const MaidPlugin: Plugin = async (ctx) => {
   const rewriteModel = (sessionID?: string) => cfg.model === MAIN_AGENT_MODEL ? resolveModel(cfg, sessionID ? mainModels.get(sessionKey(sessionID)) : undefined) : resolveModel(cfg)
   const issueProviderToken = (sessionID: string) => {
     const token = randomUUID()
-    providerTokens.set(token, sessionID)
+    providerTokens.set(token, { directory: ctx.directory, sessionID })
     const timer = setTimeout(() => providerTokens.delete(token), PROVIDER_TOKEN_TTL)
     if (typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") timer.unref()
     return token
@@ -367,9 +402,9 @@ const MaidPlugin: Plugin = async (ctx) => {
   const consumeProviderToken = (headers: Headers) => {
     const token = headers.get(PROVIDER_REWRITE_HEADER)
     if (!token) return undefined
-    const sessionID = providerTokens.get(token)
+    const item = providerTokens.get(token)
     providerTokens.delete(token)
-    return sessionID
+    return item?.directory === ctx.directory ? item.sessionID : undefined
   }
   const storeOriginal = (input: RewritePartKey, visibleText: string, originalText: string) => {
     if (!responses) throw new Error("response store is unavailable")
@@ -403,6 +438,7 @@ const MaidPlugin: Plugin = async (ctx) => {
   }
   const replayMatches = (replay: CompletedReplay, text: string) => replay.originalText === text || replay.visibleText === text
   const rewrite = async (draft: string, parentID?: string, capturedUserPrompt = currentPromptContext(parentID)) => {
+    if (!isEnabled()) return { text: split(draft).text, rewritten: false }
     const item = split(draft)
     if (!item.text) return { text: item.text, rewritten: false }
     if (item.text.length > MAX_DRAFT) return { text: item.text, rewritten: false }
@@ -430,9 +466,11 @@ const MaidPlugin: Plugin = async (ctx) => {
   }
   const providerRewrite = async (draft: string, sessionID?: string) => {
     const original = split(draft).text
+    if (!isEnabled()) return original
     if (!sessionID || isDeletedSession(sessionID) || isGuardedRewrite(sessionID) || isCompacting(sessionID) || await isPassthrough(sessionID) || isDeletedSession(sessionID)) return original
     const capturedUserPrompt = currentPromptContext(sessionID)
     const result = await rewrite(draft, sessionID, capturedUserPrompt)
+    if (!isEnabled()) return original
     const visible = result.rewritten ? result.text : original
     try {
       rememberProviderOriginal(sessionID, visible, original, !result.rewritten)
@@ -449,16 +487,44 @@ const MaidPlugin: Plugin = async (ctx) => {
     consumeRewriteToken: consumeProviderToken,
     rewrite: providerRewrite,
   }
-  if (cfg.enabled) {
-    installPublicStreamGate(hidden, passthrough, ctx.directory)
-    baseFetch = installProviderRewrite(hook)
+  const setRuntimeEnabled = async (next: boolean) => {
+    cfg.enabled = next
+    enabled.set(ctx.directory, next)
+    if (next) {
+      await ensureResponses()
+      installPublicStreamGate(hidden, passthrough, ctx.directory)
+      baseFetch = installProviderRewrite(hook)
+      return
+    }
+    for (const [token, item] of providerTokens) if (item.directory === ctx.directory) providerTokens.delete(token)
+    uninstallProviderRewrite(ctx.directory)
+    uninstallPublicStreamGate(ctx.directory)
+  }
+  await setRuntimeEnabled(cfg.enabled)
+
+  const toast = async (input: ServerToast) => {
+    await ctx.client.tui.showToast({ body: input }).catch(() => undefined)
+  }
+
+  const setCommandOutput = (parts: Array<{ type: string; text?: string; synthetic?: boolean }>, text: string) => {
+    for (const part of parts) {
+      if (part.type !== "text") continue
+      part.text = text
+      part.synthetic = true
+    }
   }
 
   return {
     config: async (input) => {
       applyMainConfig(cfg, input)
-      if (!cfg.enabled) return
       const out = input as unknown as MutableConfig
+      out.command = {
+        ...out.command,
+        [TOGGLE_COMMAND]: {
+          template: "Toggle oh-my-opencode-maid rewrites on or off immediately.",
+          description: "Toggle oh-my-opencode-maid rewrites immediately and persist the enabled config.",
+        },
+      }
       const configuredModel = resolveModel(cfg)
       out.agent = {
         ...out.agent,
@@ -486,7 +552,8 @@ const MaidPlugin: Plugin = async (ctx) => {
     },
 
     event: async (input) => {
-      if (!cfg.enabled) return
+      if (await forgetDeletedSession(input.event)) return
+      if (!isEnabled()) return
       learnSession(input.event)
       const compactionSessionID = compactionStartedSessionID(input.event)
       if (compactionSessionID) markCompacting(compactionSessionID)
@@ -494,21 +561,21 @@ const MaidPlugin: Plugin = async (ctx) => {
     },
 
     "chat.message": async (input, output) => {
-      if (!cfg.enabled) return
+      if (!isEnabled()) return
       if (await skipSession(input.sessionID)) return
       rememberUserPrompt(input.sessionID, output?.parts, output?.message, input)
       rememberMainModel(input.sessionID, input.model, input.variant)
     },
 
     "chat.params": async (input) => {
-      if (!cfg.enabled) return
+      if (!isEnabled()) return
       if (await skipSession(input.sessionID)) return
       rememberUserPrompt(input.sessionID, input.message)
       rememberMainModel(input.sessionID, input.model, stringField(input, "variant"))
     },
 
     "chat.headers": async (input, output) => {
-      if (!cfg.enabled) return
+      if (!isEnabled()) return
       if (await skipSession(input.sessionID)) return
       if (isGuardedRewrite(input.sessionID)) return
       if (isCompacting(input.sessionID)) return
@@ -519,7 +586,7 @@ const MaidPlugin: Plugin = async (ctx) => {
     },
 
     "experimental.chat.system.transform": async (input, output) => {
-      if (!cfg.enabled) return
+      if (!isEnabled()) return
       if (input.sessionID && isGuardedRewrite(input.sessionID)) {
         if (output.system.length > 0) output.system.splice(0, output.system.length, maidAgentPrompt(cfg))
         return
@@ -540,7 +607,7 @@ const MaidPlugin: Plugin = async (ctx) => {
     },
 
     "experimental.chat.messages.transform": async (_input, output) => {
-      if (!cfg.enabled || !responses) return
+      if (!isEnabled() || !responses) return
       for (const message of output.messages) {
         const info = message.info
         if (stringField(info, "role") !== "assistant") continue
@@ -575,7 +642,7 @@ const MaidPlugin: Plugin = async (ctx) => {
     },
 
     "experimental.session.compacting": async (input, output) => {
-      if (!cfg.enabled) return
+      if (!isEnabled()) return
       if (await skipSession(input.sessionID)) return
       if (isGuardedRewrite(input.sessionID)) return
       markCompacting(input.sessionID)
@@ -591,12 +658,40 @@ const MaidPlugin: Plugin = async (ctx) => {
     },
 
     "experimental.compaction.autocontinue": async (input) => {
-      if (!cfg.enabled) return
+      if (!isEnabled()) return
       clearCompacting(input.sessionID)
     },
 
+    "command.execute.before": async (input, output) => {
+      if (input.command !== TOGGLE_COMMAND) return
+      const previous = isEnabled()
+      try {
+        const result = await toggleRewriteEnabled()
+        await setRuntimeEnabled(result.enabled)
+        const label = result.enabled ? "enabled" : "disabled"
+        const message = `Maid rewrites are now ${label}.`
+        setCommandOutput(output.parts, message)
+        await toast({
+          variant: "success",
+          title: result.enabled ? "Rewrite enabled" : "Rewrite disabled",
+          message,
+          duration: 5000,
+        })
+      } catch (error) {
+        await setRuntimeEnabled(previous)
+        const message = error instanceof Error ? error.message : "Unknown rewrite toggle error"
+        setCommandOutput(output.parts, `Maid rewrite toggle failed: ${message}`)
+        await toast({
+          variant: "error",
+          title: "Rewrite toggle failed",
+          message,
+          duration: 5000,
+        })
+      }
+    },
+
     "experimental.text.complete": async (input, output) => {
-      if (!cfg.enabled) return
+      if (!isEnabled()) return
       if (isDeletedSession(input.sessionID)) return
       if (hidden.has(input.sessionID)) return
       if (await isPassthrough(input.sessionID)) return
@@ -624,7 +719,8 @@ const MaidPlugin: Plugin = async (ctx) => {
       }
       const existing = pending.get(done)
       if (existing && existing.originalText === item.text) {
-        output.text = (await existing.promise).text
+        const result = await existing.promise
+        output.text = isEnabled() ? result.text : item.text
         return
       }
       let providerOriginal: PendingProviderOriginal | undefined
@@ -658,6 +754,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       const work = rewrite(output.text, input.sessionID, capturedUserPrompt)
         .then((result) => {
           if (!entry || pending.get(done) !== entry) return result
+          if (!isEnabled()) return { text: item.text, rewritten: false }
           if (result.rewritten) {
             try {
               storeOriginal(input, result.text, item.text)
@@ -681,7 +778,8 @@ const MaidPlugin: Plugin = async (ctx) => {
         })
       entry = { originalText: item.text, promise: work }
       pending.set(done, entry)
-      output.text = (await work).text
+      const result = await work
+      output.text = isEnabled() ? result.text : item.text
     },
   }
 }

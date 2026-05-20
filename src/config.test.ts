@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { DEFAULT_MODEL, MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig } from "./config"
+import { DEFAULT_MODEL, MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig, toggleRewriteEnabled, userConfigPath } from "./config"
 
 async function temp() {
   return mkdtemp(path.join(tmpdir(), "omo-maid-"))
@@ -337,6 +337,90 @@ describe("config", () => {
       await expect(loadConfig(dir)).resolves.toMatchObject({
         model: MAIN_AGENT_MODEL,
       })
+    })
+  })
+
+  test("toggles rewrite enabled in the user config", async () => {
+    await isolated(async (dir) => {
+      const first = await toggleRewriteEnabled()
+
+      expect(first).toEqual({ enabled: false, path: userConfigFile() })
+      await expect(loadConfig(dir)).resolves.toMatchObject({ enabled: false })
+
+      const second = await toggleRewriteEnabled()
+
+      expect(second).toEqual({ enabled: true, path: userConfigFile() })
+      await expect(loadConfig(dir)).resolves.toMatchObject({ enabled: true })
+    })
+  })
+
+  test("preserves JSONC comments while toggling rewrite enabled", async () => {
+    await isolated(async () => {
+      const file = userConfigFile()
+      const original = '{\n  // keep this comment\n  "enabled": false,\n  "roleplay_prompt": "custom maid",\n}\n'
+      await mkdir(path.dirname(file), { recursive: true })
+      await Bun.write(file, original)
+
+      await expect(toggleRewriteEnabled()).resolves.toEqual({ enabled: true, path: file })
+
+      const next = await Bun.file(file).text()
+      expect(next).toContain("// keep this comment")
+      expect(next).toContain('"enabled": true')
+      expect(next).toContain('"roleplay_prompt": "custom maid"')
+    })
+  })
+
+  test("inserts rewrite enabled when missing from user config", async () => {
+    await isolated(async () => {
+      const file = userConfigFile()
+      const original = '{\n  // no enabled key yet\n  "roleplay_prompt": "custom maid"\n}\n'
+      await mkdir(path.dirname(file), { recursive: true })
+      await Bun.write(file, original)
+
+      await expect(toggleRewriteEnabled()).resolves.toEqual({ enabled: false, path: file })
+
+      const next = await Bun.file(file).text()
+      expect(next).toContain("// no enabled key yet")
+      expect(next).toContain('"enabled": false')
+      expect(next).toContain('"roleplay_prompt": "custom maid"')
+    })
+  })
+
+  test("rejects invalid user config before toggling", async () => {
+    await isolated(async () => {
+      const file = userConfigFile()
+      const original = '{\n  "enabled": true,\n  "unexpected": true\n}\n'
+      await mkdir(path.dirname(file), { recursive: true })
+      await Bun.write(file, original)
+
+      await expect(toggleRewriteEnabled()).rejects.toThrow("Unrecognized key")
+      expect(await Bun.file(file).text()).toBe(original)
+    })
+  })
+
+  test("toggles rewrite config through HOME when XDG_CONFIG_HOME is unset", async () => {
+    await isolated(async (dir) => {
+      delete process.env.XDG_CONFIG_HOME
+
+      await expect(toggleRewriteEnabled()).resolves.toEqual({
+        enabled: false,
+        path: path.join(dir, "home", ".config", "opencode", "oh-my-opencode-maid.jsonc"),
+      })
+      expect(userConfigPath()).toBe(path.join(dir, "home", ".config", "opencode", "oh-my-opencode-maid.jsonc"))
+    })
+  })
+
+  test("toggle ignores project plugin config", async () => {
+    await isolated(async (dir) => {
+      const projectFile = projectConfigFile(dir)
+      const project = '{"enabled": false}'
+      await mkdir(path.dirname(projectFile), { recursive: true })
+      await Bun.write(projectFile, project)
+
+      await expect(toggleRewriteEnabled()).resolves.toMatchObject({ enabled: false })
+
+      expect(await Bun.file(projectFile).text()).toBe(project)
+      expect(await Bun.file(userConfigFile()).exists()).toBe(true)
     })
   })
 

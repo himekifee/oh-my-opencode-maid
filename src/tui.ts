@@ -269,4 +269,4 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   })
 }
 
-export default { tui }
+export default { id: "oh-my-opencode-maid", tui }

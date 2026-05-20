@@ -16,6 +16,15 @@ type Model = Parameters<NonNullable<Hooks["experimental.chat.system.transform"]>
 type MessagesOutput = Parameters<NonNullable<Hooks["experimental.chat.messages.transform"]>>[1]
 type ChatMessageInput = Parameters<NonNullable<Hooks["chat.message"]>>[0]
 type ChatMessageOutput = Parameters<NonNullable<Hooks["chat.message"]>>[1]
+type CommandOutput = Parameters<NonNullable<Hooks["command.execute.before"]>>[1]
+type ToastCall = {
+  body: {
+    title?: string
+    message: string
+    variant?: "info" | "success" | "warning" | "error"
+    duration?: number
+  }
+}
 
 function record(input: unknown): input is Record<string, unknown> {
   return Boolean(input) && typeof input === "object" && !Array.isArray(input)
@@ -55,7 +64,7 @@ async function providerHeaders(hooks: Hooks, sessionID = "user-session", activeM
   return output.headers
 }
 
-function ctx(session: unknown, dir: string): PluginInput {
+function ctx(session: unknown, dir: string, toasts: ToastCall[] = []): PluginInput {
   return {
     directory: dir,
     worktree: dir,
@@ -63,8 +72,22 @@ function ctx(session: unknown, dir: string): PluginInput {
     project: {} as PluginInput["project"],
     experimental_workspace: { register() {} },
     $: {} as PluginInput["$"],
-    client: { session } as unknown as PluginInput["client"],
+    client: {
+      session,
+      tui: {
+        showToast(input: ToastCall) {
+          toasts.push(input)
+          return Promise.resolve({ data: true })
+        },
+      },
+    } as unknown as PluginInput["client"],
   }
+}
+
+function commandOutput(text = "toggle") {
+  return {
+    parts: [{ id: "cmd-part", sessionID: "user-session", messageID: "cmd-message", type: "text", text, time: { start: 1 } }],
+  } as unknown as CommandOutput
 }
 
 function messages(input: { info: Record<string, unknown>; parts: Record<string, unknown>[] }[]): MessagesOutput {
@@ -104,6 +127,7 @@ function resetPluginGlobals() {
   delete globalThis.__ohMyOpencodeMaidProviderOriginals
   delete globalThis.__ohMyOpencodeMaidResponses
   delete globalThis.__ohMyOpencodeMaidRewriteScope
+  delete globalThis.__ohMyOpencodeMaidEnabled
 }
 
 function fakeResponseStore(overrides: Partial<ResponseStore>): ResponseStore {
@@ -195,6 +219,233 @@ describe("plugin hooks", () => {
       })
       expect(typeof (cfg.provider?.fake as unknown as { options?: { fetch?: unknown } }).options?.fetch).toBe("function")
       expect(output.system.join("\n")).toContain(HANDOFF)
+    })
+  })
+
+  test("registers the server-side rewrite toggle command even when disabled", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ enabled: false }))
+      const hooks = await MaidPlugin(ctx({}, dir))
+      const cfg: Config = { provider: { fake: { options: {} } } } as unknown as Config
+
+      await hooks.config?.(cfg)
+
+      const command = (cfg as unknown as { command?: Record<string, { template: string; description?: string }> }).command?.["maid-rewrite-toggle"]
+      const agent = cfg.agent?.roleplay_rewrite as unknown as Record<string, unknown>
+      expect(command).toEqual({
+        template: "Toggle oh-my-opencode-maid rewrites on or off immediately.",
+        description: "Toggle oh-my-opencode-maid rewrites immediately and persist the enabled config.",
+      })
+      expect(agent.hidden).toBe(true)
+      expect(typeof (cfg.provider?.fake as unknown as { options?: { fetch?: unknown } }).options?.fetch).toBe("function")
+    })
+  })
+
+  test("server rewrite toggle persists config and disables rewrites immediately", async () => {
+    await isolated(async (dir) => {
+      let prompts = 0
+      const toasts: ToastCall[] = []
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts}` } }
+        },
+        async prompt() {
+          prompts += 1
+          return { data: { parts: [{ type: "text", text: `Maid ${prompts} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir, toasts))
+      const before = { text: "Raw SECRET_TOKEN" }
+      const output = commandOutput()
+      const after = { text: "Second raw SECRET_TOKEN" }
+
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m1", partID: "p1" }, before)
+      await hooks["command.execute.before"]?.({ command: "maid-rewrite-toggle", sessionID: "user-session", arguments: "" }, output)
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m2", partID: "p2" }, after)
+
+      expect(before.text).toBe("Maid 1 SECRET_TOKEN")
+      expect(after.text).toBe("Second raw SECRET_TOKEN")
+      expect(prompts).toBe(1)
+      expect(JSON.parse(await Bun.file(userConfigFile()).text()).enabled).toBe(false)
+      expect(output.parts[0]).toMatchObject({ type: "text", text: "Maid rewrites are now disabled.", synthetic: true })
+      expect(toasts).toEqual([{ body: { variant: "success", title: "Rewrite disabled", message: "Maid rewrites are now disabled.", duration: 5000 } }])
+    })
+  })
+
+  test("server rewrite toggle gates reused pending rewrites after disabling", async () => {
+    await isolated(async (dir) => {
+      let release: (() => void) | undefined
+      let promptStarted: (() => void) | undefined
+      const started = new Promise<void>((resolve) => {
+        promptStarted = resolve
+      })
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: "maid-session" } }
+        },
+        async prompt() {
+          promptStarted?.()
+          return new Promise((resolve) => {
+            release = () => resolve({ data: { parts: [{ type: "text", text: "Maid SECRET_TOKEN" }] } })
+          })
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const input = { sessionID: "user-session", messageID: "m", partID: "p" }
+      const first = { text: "Raw SECRET_TOKEN" }
+      const second = { text: "Raw SECRET_TOKEN" }
+
+      const firstWork = hooks["experimental.text.complete"]?.(input, first)
+      await started
+      const secondWork = hooks["experimental.text.complete"]?.(input, second)
+      await hooks["command.execute.before"]?.({ command: "maid-rewrite-toggle", sessionID: "user-session", arguments: "" }, commandOutput())
+      release?.()
+      await Promise.all([firstWork, secondWork])
+
+      expect(first.text).toBe("Raw SECRET_TOKEN")
+      expect(second.text).toBe("Raw SECRET_TOKEN")
+    })
+  })
+
+  test("server rewrite toggle enables rewrites immediately from startup disabled", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ enabled: false }))
+      let prompts = 0
+      const toasts: ToastCall[] = []
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts}` } }
+        },
+        async prompt() {
+          prompts += 1
+          return { data: { parts: [{ type: "text", text: `Maid ${prompts} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir, toasts))
+      const before = { text: "Raw SECRET_TOKEN" }
+      const output = commandOutput()
+      const after = { text: "Second raw SECRET_TOKEN" }
+
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m1", partID: "p1" }, before)
+      await hooks["command.execute.before"]?.({ command: "maid-rewrite-toggle", sessionID: "user-session", arguments: "" }, output)
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m2", partID: "p2" }, after)
+
+      expect(before.text).toBe("Raw SECRET_TOKEN")
+      expect(after.text).toBe("Maid 1 SECRET_TOKEN")
+      expect(JSON.parse(await Bun.file(userConfigFile()).text()).enabled).toBe(true)
+      expect(output.parts[0]).toMatchObject({ type: "text", text: "Maid rewrites are now enabled.", synthetic: true })
+      expect(toasts).toEqual([{ body: { variant: "success", title: "Rewrite enabled", message: "Maid rewrites are now enabled.", duration: 5000 } }])
+    })
+  })
+
+  test("server rewrite toggle immediately controls provider headers and stale provider tokens", async () => {
+    await isolated(async (dir) => {
+      let prompts = 0
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts}` } }
+        },
+        async prompt() {
+          prompts += 1
+          return { data: { parts: [{ type: "text", text: `Maid ${prompts} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const cfg: Config = { provider: { fake: { options: { fetch: providerResponseFetch() } } } } as unknown as Config
+      await hooks.config?.(cfg)
+      const fetcher = (cfg.provider?.fake as unknown as { options?: { fetch?: typeof fetch } }).options?.fetch
+      if (!fetcher) throw new Error("provider fetch was not installed")
+      const staleHeaders = await providerHeaders(hooks)
+      const output = commandOutput()
+
+      await hooks["command.execute.before"]?.({ command: "maid-rewrite-toggle", sessionID: "user-session", arguments: "" }, output)
+      const disabledHeaders = await providerHeaders(hooks)
+      const staleResponse = await fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: staleHeaders,
+        body: providerBody(),
+      }).then((res) => res.text())
+
+      expect(typeof staleHeaders[PROVIDER_REWRITE_HEADER]).toBe("string")
+      expect(disabledHeaders[PROVIDER_REWRITE_HEADER]).toBeUndefined()
+      expect(staleResponse).toContain("Raw SECRET_TOKEN")
+      expect(staleResponse).not.toContain("Maid 1 SECRET_TOKEN")
+      expect(prompts).toBe(0)
+    })
+  })
+
+  test("server rewrite toggle enables configured provider rewrites without restart", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ enabled: false }))
+      let prompts = 0
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts}` } }
+        },
+        async prompt() {
+          prompts += 1
+          return { data: { parts: [{ type: "text", text: `Maid ${prompts} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir))
+      const cfg: Config = { provider: { fake: { options: { fetch: providerResponseFetch() } } } } as unknown as Config
+      await hooks.config?.(cfg)
+      const fetcher = (cfg.provider?.fake as unknown as { options?: { fetch?: typeof fetch } }).options?.fetch
+      if (!fetcher) throw new Error("provider fetch was not installed")
+      expect((await providerHeaders(hooks))[PROVIDER_REWRITE_HEADER]).toBeUndefined()
+      await hooks["command.execute.before"]?.({ command: "maid-rewrite-toggle", sessionID: "user-session", arguments: "" }, commandOutput())
+
+      const response = await fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: await providerHeaders(hooks),
+        body: providerBody(),
+      }).then((res) => res.text())
+
+      expect(response).toContain("Maid 1 SECRET_TOKEN")
+      expect(prompts).toBe(1)
+    })
+  })
+
+  test("server rewrite toggle reports persistence failures and keeps live state", async () => {
+    await isolated(async (dir) => {
+      const toasts: ToastCall[] = []
+      let prompts = 0
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts}` } }
+        },
+        async prompt() {
+          prompts += 1
+          return { data: { parts: [{ type: "text", text: `Maid ${prompts} SECRET_TOKEN` }] } }
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir, toasts))
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), "{ invalid")
+      const output = commandOutput()
+      const after = { text: "Raw SECRET_TOKEN" }
+
+      await hooks["command.execute.before"]?.({ command: "maid-rewrite-toggle", sessionID: "user-session", arguments: "" }, output)
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, after)
+
+      expect(output.parts[0]).toMatchObject({ type: "text", text: expect.stringContaining("Maid rewrite toggle failed: Invalid JSONC"), synthetic: true })
+      expect(toasts).toEqual([{ body: { variant: "error", title: "Rewrite toggle failed", message: expect.stringContaining("Invalid JSONC"), duration: 5000 } }])
+      expect(after.text).toBe("Maid 1 SECRET_TOKEN")
     })
   })
 
@@ -2005,6 +2256,27 @@ describe("plugin hooks", () => {
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "deleted-session", id: "m" }, parts: [part] }]))
 
       expect(part.text).toBe("Maid SECRET_TOKEN")
+    })
+  })
+
+  test("session deletion purges persisted originals while rewrites are disabled", async () => {
+    await isolated(async (dir) => {
+      const store = await createResponseStore()
+      const ref = { directory: dir, sessionID: "deleted-session", messageID: "m", partID: "p" }
+      store.putOriginal(ref, "Maid SECRET_TOKEN", "Raw SECRET_TOKEN")
+      store.close()
+      await mkdir(path.dirname(userConfigFile()), { recursive: true })
+      await writeFile(userConfigFile(), JSON.stringify({ enabled: false }))
+      const hooks = await MaidPlugin(ctx({}, dir))
+
+      await hooks.event?.({
+        event: {
+          type: "session.deleted",
+          properties: { sessionID: "deleted-session" },
+        },
+      })
+
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal(ref, "Maid SECRET_TOKEN")).toBeUndefined()
     })
   })
 

@@ -1,12 +1,7 @@
+import { appendFileSync, mkdirSync } from "node:fs"
+import path from "node:path"
 import { DISPLAY_ONLY_FALLBACK } from "./fallback"
 import { createResponseStore, type ResponseKey, type ResponseStore } from "./responses"
-
-type TuiToast = {
-  variant?: "info" | "success" | "warning" | "error"
-  title?: string
-  message: string
-  duration?: number
-}
 
 type TuiDialog = {
   replace(render: () => unknown, onClose?: () => void): void
@@ -52,7 +47,6 @@ type TuiApi = {
   ui: {
     DialogAlert(props: { title: string; message: string; onConfirm?: () => void }): unknown
     dialog: TuiDialog
-    toast(input: TuiToast): void
   }
   command?: {
     register(cb: () => TuiCommand[]): () => void
@@ -86,6 +80,7 @@ type FallbackRef = ResponseKey & {
 }
 
 const MAX_DISPLAY_CHARS = 20_000
+const DEBUG_ENV = "OH_MY_OPENCODE_MAID_TUI_DEBUG"
 
 function record(input: unknown): input is Record<string, unknown> {
   return Boolean(input) && typeof input === "object" && !Array.isArray(input)
@@ -95,6 +90,27 @@ function stringField(input: unknown, field: string) {
   if (!record(input)) return undefined
   const value = input[field]
   return typeof value === "string" ? value : undefined
+}
+
+function debugFile() {
+  const value = process.env[DEBUG_ENV]
+  if (!value) return undefined
+  if (value !== "1" && value !== "true") return path.resolve(value)
+  const base = process.env.XDG_STATE_HOME ? path.resolve(process.env.XDG_STATE_HOME) : process.env.HOME ? path.join(process.env.HOME, ".local", "state") : undefined
+  return base ? path.join(base, "opencode", "oh-my-opencode-maid", "tui-debug.log") : undefined
+}
+
+function debugTui(event: string, data: Record<string, unknown> = {}) {
+  const file = debugFile()
+  if (!file) return
+  try {
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+    const entry: Record<string, unknown> = { time: new Date().toISOString(), event }
+    for (const [key, value] of Object.entries(data)) entry[key === "event" ? "payload" : key] = value
+    appendFileSync(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 })
+  } catch (error) {
+    if (process.env.OH_MY_OPENCODE_MAID_TUI_DEBUG_STDERR) console.error("[oh-my-opencode-maid:tui-debug]", error)
+  }
 }
 
 function fallbackRefFromPart(directory: string, part: unknown): FallbackRef | undefined {
@@ -146,7 +162,20 @@ function decorationKey(ref: ResponseKey) {
   return `${ref.messageID}\0${ref.partID}`
 }
 
-function findLastFallbackRef(api: TuiApi): FallbackRef | undefined {
+function originalFor(store: ResponseStore | undefined, ref: FallbackRef) {
+  if (!store) return undefined
+  try {
+    return store.getOriginal(ref, ref.visibleText)
+  } catch {
+    return undefined
+  }
+}
+
+function hasOriginal(store: ResponseStore | undefined, ref: FallbackRef) {
+  return originalFor(store, ref) !== undefined
+}
+
+function findLastOriginalRef(api: TuiApi, store: ResponseStore | undefined): FallbackRef | undefined {
   const current = api.route.current
   const sessionID = current.name === "session" ? stringField(current.params, "sessionID") : undefined
   if (!sessionID) return undefined
@@ -158,8 +187,10 @@ function findLastFallbackRef(api: TuiApi): FallbackRef | undefined {
     if (!messageID) continue
     const parts = api.state.part(messageID)
     for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
-      const ref = fallbackRefFromPart(api.state.path.directory, parts[partIndex])
-      if (ref) return ref
+      const fallback = fallbackRefFromPart(api.state.path.directory, parts[partIndex])
+      if (fallback && hasOriginal(store, fallback)) return fallback
+      const successful = successfulRewriteRefFromPart(api.state.path.directory, parts[partIndex])
+      if (successful && hasOriginal(store, successful)) return successful
     }
   }
   return undefined
@@ -170,28 +201,13 @@ function displayText(original: string) {
   return `${original.slice(0, MAX_DISPLAY_CHARS)}\n\n[truncated for local TUI display]`
 }
 
-function showUnavailable(api: TuiApi) {
-  api.ui.toast({
-    variant: "warning",
-    title: "Original unavailable",
-    message: "No sidecar original was found for the rewrite fallback.",
-    duration: 5000,
-  })
-}
-
 async function openOriginal(api: TuiApi, store: ResponseStore | undefined, ref: FallbackRef | undefined) {
-  if (!ref) return showUnavailable(api)
-  if (!store) return showUnavailable(api)
-  let original: string | undefined
-  try {
-    original = store.getOriginal(ref, ref.visibleText)
-  } catch {
-    return showUnavailable(api)
-  }
-  if (!original) return showUnavailable(api)
+  if (!ref) return
+  const original = originalFor(store, ref)
+  if (original === undefined) return
   api.ui.dialog.setSize("xlarge")
   api.ui.dialog.replace(() => api.ui.DialogAlert({
-    title: "Original rewrite fallback",
+    title: "Original rewrite",
     message: displayText(original),
     onConfirm: () => api.ui.dialog.clear(),
   }))
@@ -199,68 +215,101 @@ async function openOriginal(api: TuiApi, store: ResponseStore | undefined, ref: 
 
 async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   const store = await createResponseStore().catch(() => undefined)
-  let lastFallback: FallbackRef | undefined
+  let lastOriginalRef: FallbackRef | undefined
   const activeDecorations = new Map<string, ActiveDecoration>()
 
+  const disposeActiveDecoration = (key: string) => {
+    try {
+      activeDecorations.get(key)?.dispose?.()
+    } catch (error) {
+      debugTui("host.decoration.dispose.failed", { error: error instanceof Error ? error.message : String(error) })
+    }
+    activeDecorations.delete(key)
+  }
+
+  const tryHostDecoration = (ref: FallbackRef, original: string): boolean => {
+    const key = decorationKey(ref)
+    const active = activeDecorations.get(key)
+    if (active?.visibleText === ref.visibleText) return true
+    const hook = getHostDecorationHook(api)
+    if (!hook?.decorateTextPart) return false
+    try {
+      disposeActiveDecoration(key)
+      const disposeDecoration = hook.decorateTextPart(ref.messageID, ref.partID, {
+        type: "collapsed-thought",
+        label: "Original",
+        content: displayText(original),
+        style: "dark",
+        collapsed: true,
+      })
+      activeDecorations.set(key, {
+        visibleText: ref.visibleText,
+        dispose: typeof disposeDecoration === "function" ? disposeDecoration : undefined,
+      })
+      return true
+    } catch (error) {
+      debugTui("host.decoration.failed", { messageID: ref.messageID, partID: ref.partID, error: error instanceof Error ? error.message : String(error) })
+      return false
+    }
+  }
+
   const unsubscribeEvent = api.event.on("message.part.updated", (event) => {
+    debugTui("event.message.part.updated", { event })
     const fallbackRef = fallbackRefFromEvent(api.state.path.directory, event)
     if (fallbackRef) {
-      lastFallback = fallbackRef
+      if (hasOriginal(store, fallbackRef)) lastOriginalRef = fallbackRef
       void openOriginal(api, store, fallbackRef)
       return
     }
 
     const rewriteRef = successfulRewriteRefFromEvent(api.state.path.directory, event)
-    const hook = getHostDecorationHook(api)
-    if (rewriteRef && store && hook?.decorateTextPart) {
+    if (rewriteRef && store) {
       const key = decorationKey(rewriteRef)
-      if (activeDecorations.get(key)?.visibleText === rewriteRef.visibleText) return
-      let original: string | undefined
-      try {
-        original = store.getContextOriginal(rewriteRef, rewriteRef.visibleText)
-      } catch {
-        return
-      }
-      if (original) {
-        try {
-          activeDecorations.get(key)?.dispose?.()
-          const disposeDecoration = hook.decorateTextPart(rewriteRef.messageID, rewriteRef.partID, {
-            type: "collapsed-thought",
-            label: "Original",
-            content: displayText(original),
-            style: "dark",
-            collapsed: true,
-          })
-          activeDecorations.set(key, {
-            visibleText: rewriteRef.visibleText,
-            dispose: typeof disposeDecoration === "function" ? disposeDecoration : undefined,
-          })
-        } catch {
-          return
-        }
+      const active = activeDecorations.get(key)
+      if (active?.visibleText === rewriteRef.visibleText) return
+      const original = originalFor(store, rewriteRef)
+      if (original !== undefined) {
+        debugTui("original.found", { messageID: rewriteRef.messageID, partID: rewriteRef.partID, visibleLength: rewriteRef.visibleText.length })
+        lastOriginalRef = rewriteRef
+        if (!tryHostDecoration(rewriteRef, original)) debugTui("host.decoration.unavailable", { messageID: rewriteRef.messageID, partID: rewriteRef.partID })
+      } else {
+        debugTui("original.missing", { messageID: rewriteRef.messageID, partID: rewriteRef.partID, visibleLength: rewriteRef.visibleText.length })
       }
     }
   })
 
+  const debugUnsubscribers = [
+    api.event.on("session.next.text.ended", (event) => debugTui("event.session.next.text.ended", { event, route: api.route.current })),
+    api.event.on("session.next.step.ended", (event) => debugTui("event.session.next.step.ended", { event, route: api.route.current })),
+  ]
+
+  debugTui("tui.init", {
+    directory: api.state.path.directory,
+    route: api.route.current,
+    hasCommand: Boolean(api.command),
+    hasHostDecoration: Boolean(getHostDecorationHook(api)?.decorateTextPart),
+  })
+
   const unregisterCommand = api.command?.register(() => [{
-    title: "Show original rewrite fallback",
-    value: "maid.original_fallback",
-    description: "Open the sidecar-stored original for the latest rewrite fallback.",
+    title: "Show original rewrite",
+    value: "maid.original",
+    description: "Open the sidecar-stored original for the latest rewrite.",
     category: "oh-my-opencode-maid",
     slash: {
       name: "maid-original",
-      aliases: ["maid-fallback-original"],
     },
-    onSelect: () => openOriginal(api, store, lastFallback ?? findLastFallbackRef(api)),
+    onSelect: () => openOriginal(api, store, lastOriginalRef ?? findLastOriginalRef(api, store)),
   }])
 
   api.lifecycle?.onDispose(() => {
     unsubscribeEvent()
+    for (const unsubscribe of debugUnsubscribers) unsubscribe()
     unregisterCommand?.()
     for (const decoration of activeDecorations.values()) {
       try {
         decoration.dispose?.()
-      } catch {
+      } catch (error) {
+        debugTui("host.decoration.dispose.failed", { error: error instanceof Error ? error.message : String(error) })
         continue
       }
     }

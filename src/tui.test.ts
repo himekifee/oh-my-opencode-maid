@@ -37,7 +37,6 @@ type FakeApi = Parameters<typeof tuiModule.tui>[0]
 type FakeRuntime = {
   api: FakeApi
   dialogs: string[]
-  toasts: { message: string; title?: string; variant?: string; duration?: number }[]
   sizes: string[]
   handlers: Record<string, EventHandler>
   commands: Command[]
@@ -71,7 +70,6 @@ async function isolated<T>(fn: (dir: string) => Promise<T>) {
 
 function fakeApi(directory: string): FakeRuntime {
   const dialogs: string[] = []
-  const toasts: { message: string; title?: string; variant?: string; duration?: number }[] = []
   const sizes: string[] = []
   const handlers: Record<string, EventHandler> = {}
   const commands: Command[] = []
@@ -115,9 +113,6 @@ function fakeApi(directory: string): FakeRuntime {
           sizes.push(size)
         },
       },
-      toast(input: { message: string; title?: string; variant?: string }) {
-        toasts.push(input)
-      },
     },
     command: {
       register(cb: () => Command[]) {
@@ -137,7 +132,6 @@ function fakeApi(directory: string): FakeRuntime {
   return {
     api,
     dialogs,
-    toasts,
     sizes,
     handlers,
     commands,
@@ -196,7 +190,7 @@ describe("tui fallback display", () => {
     })
   })
 
-  test("does not show inline original decoration for display-only rows", async () => {
+  test("shows inline original decoration for display-only successful rows", async () => {
     await isolated(async (dir) => {
       const store = await createResponseStore()
       store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
@@ -223,19 +217,19 @@ describe("tui fallback display", () => {
         },
       })
 
-      expect(decorations.length).toBe(0)
+      expect(decorations.length).toBe(1)
+      expect(decorations[0].decoration.content).toBe("Original text")
 
       await runtime.dispose?.()
     })
   })
 
-  test("safely no-ops if host hook is missing", async () => {
+  test("safely no-ops if host decoration hook is missing", async () => {
     await isolated(async (dir) => {
       const store = await createResponseStore()
       store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
       const runtime = fakeApi(dir)
-      // no decorateTextPart
 
       await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
 
@@ -289,6 +283,37 @@ describe("tui fallback display", () => {
 
       await runtime.dispose?.()
       expect(disposed).toBe(1)
+    })
+  })
+
+  test("does not host-decorate fallback display-only rows", async () => {
+    await isolated(async (dir) => {
+      const runtime = fakeApi(dir)
+      let decorations = 0
+      ;(runtime.api.ui as DecoratingUi).decorateTextPart = () => {
+        decorations += 1
+      }
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+
+      runtime.handlers["message.part.updated"]?.({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "p",
+            sessionID: "user-session",
+            messageID: "m",
+            type: "text",
+            text: DISPLAY_ONLY_FALLBACK,
+            time: { start: 1, end: 2 },
+          },
+        },
+      })
+
+      expect(decorations).toBe(0)
+      expect(runtime.dialogs).toEqual([])
+
+      await runtime.dispose?.()
     })
   })
 
@@ -391,12 +416,11 @@ describe("tui fallback display", () => {
 
       expect(runtime.dialogs).toEqual(["Raw SECRET_TOKEN"])
       expect(runtime.sizes).toEqual(["xlarge"])
-      expect(runtime.toasts).toEqual([])
       await runtime.dispose?.()
     })
   })
 
-  test("shows a local warning when fallback original is unavailable", async () => {
+  test("no-ops when fallback original is unavailable", async () => {
     await isolated(async (dir) => {
       const runtime = fakeApi(dir)
 
@@ -416,7 +440,7 @@ describe("tui fallback display", () => {
       })
 
       expect(runtime.dialogs).toEqual([])
-      expect(runtime.toasts).toEqual([{ variant: "warning", title: "Original unavailable", message: "No sidecar original was found for the rewrite fallback.", duration: 5000 }])
+      expect(runtime.sizes).toEqual([])
       await runtime.dispose?.()
     })
   })
@@ -435,6 +459,47 @@ describe("tui fallback display", () => {
 
       expect(runtime.commands.find((command) => command.slash?.name === "maid-original")?.slash?.name).toBe("maid-original")
       expect(runtime.dialogs).toEqual(["Command raw SECRET_TOKEN"])
+      await runtime.dispose?.()
+    })
+  })
+
+  test("slash command reopens latest successful rewrite original from TUI state", async () => {
+    await isolated(async (dir) => {
+      const store = await createResponseStore()
+      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Successful original SECRET_TOKEN")
+      store.close()
+      const runtime = fakeApi(dir)
+      runtime.messages.push({ id: "m", role: "assistant" })
+      runtime.parts.m = [{ id: "p", sessionID: "user-session", messageID: "m", type: "text", text: "Rewritten text", time: { start: 1, end: 2 } }]
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+      await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
+
+      expect(runtime.dialogs).toEqual(["Successful original SECRET_TOKEN"])
+      await runtime.dispose?.()
+    })
+  })
+
+  test("slash command skips completed text parts without sidecar originals", async () => {
+    await isolated(async (dir) => {
+      const store = await createResponseStore()
+      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "stored" }, "Rewritten text", "Stored original SECRET_TOKEN")
+      store.close()
+      const runtime = fakeApi(dir)
+      runtime.messages.push({ id: "m", role: "assistant" })
+      runtime.parts.m = [
+        { id: "stored", sessionID: "user-session", messageID: "m", type: "text", text: "Rewritten text", time: { start: 1, end: 2 } },
+        { id: "plain", sessionID: "user-session", messageID: "m", type: "text", text: "Plain text without sidecar", time: { start: 3, end: 4 } },
+      ]
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+      runtime.handlers["message.part.updated"]?.({
+        type: "message.part.updated",
+        properties: { part: runtime.parts.m[1] },
+      })
+      await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
+
+      expect(runtime.dialogs).toEqual(["Stored original SECRET_TOKEN"])
       await runtime.dispose?.()
     })
   })

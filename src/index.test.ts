@@ -1055,7 +1055,7 @@ describe("plugin hooks", () => {
     })
   })
 
-  test("restores text-complete originals for future message serialization", async () => {
+  test("keeps text-complete originals out of future message serialization", async () => {
     await isolated(async (dir) => {
       const hooks = await MaidPlugin(ctx({
         async create() {
@@ -1076,11 +1076,13 @@ describe("plugin hooks", () => {
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
 
       expect(output.text).toBe("Maid SECRET_TOKEN")
-      expect(part.text).toBe("Plain draft SECRET_TOKEN")
+      expect(part.text).toBe("Maid SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid SECRET_TOKEN")).toBe("Plain draft SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid SECRET_TOKEN")).toBeUndefined()
     })
   })
 
-  test("does not restore handoff notes into future message serialization", async () => {
+  test("does not restore raw handoff drafts into future message serialization", async () => {
     await isolated(async (dir) => {
       const hooks = await MaidPlugin(ctx({
         async create() {
@@ -1100,7 +1102,8 @@ describe("plugin hooks", () => {
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
 
       expect(output.text).toBe("Maid SECRET_TOKEN")
-      expect(part.text).toBe("Raw SECRET_TOKEN")
+      expect(part.text).toBe("Maid SECRET_TOKEN")
+      expect(part.text).not.toContain("Raw SECRET_TOKEN")
       expect(part.text).not.toContain(HANDOFF)
     })
   })
@@ -1148,7 +1151,9 @@ describe("plugin hooks", () => {
 
       expect(response).toContain("Maid SECRET_TOKEN")
       expect(output.text).toBe("Maid SECRET_TOKEN")
-      expect(part.text).toBe("Raw SECRET_TOKEN")
+      expect(part.text).toBe("Maid SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "other" }, "Maid SECRET_TOKEN")).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "other" }, "Maid SECRET_TOKEN")).toBeUndefined()
       expect(prompts).toBe(1)
     })
   })
@@ -1202,7 +1207,9 @@ describe("plugin hooks", () => {
 
       expect(response).toContain("Maid SECRET_TOKEN")
       expect(output.text).toBe("Maid SECRET_TOKEN")
-      expect(part.text).toBe("Raw SECRET_TOKEN")
+      expect(part.text).toBe("Maid SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid SECRET_TOKEN")).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid SECRET_TOKEN")).toBeUndefined()
       expect(prompts).toBe(1)
     })
   })
@@ -1257,7 +1264,7 @@ describe("plugin hooks", () => {
     })
   })
 
-  test("restores duplicate provider rewrites with the same visible text", async () => {
+  test("keeps duplicate provider originals display-only with the same visible text", async () => {
     await isolated(async (dir) => {
       let prompts = 0
       const drafts = [carry("First raw SECRET_TOKEN"), carry("Second raw SECRET_TOKEN")]
@@ -1313,8 +1320,12 @@ describe("plugin hooks", () => {
 
       expect(first.text).toBe("Maid SECRET_TOKEN")
       expect(second.text).toBe("Maid SECRET_TOKEN")
-      expect(firstPart.text).toBe("First raw SECRET_TOKEN")
-      expect(secondPart.text).toBe("Second raw SECRET_TOKEN")
+      expect(firstPart.text).toBe("Maid SECRET_TOKEN")
+      expect(secondPart.text).toBe("Maid SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m1", partID: "p1" }, "Maid SECRET_TOKEN")).toBe("First raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m1", partID: "p1" }, "Maid SECRET_TOKEN")).toBeUndefined()
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m2", partID: "p2" }, "Maid SECRET_TOKEN")).toBe("Second raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m2", partID: "p2" }, "Maid SECRET_TOKEN")).toBeUndefined()
       expect(prompts).toBe(2)
     })
   })
@@ -1373,8 +1384,12 @@ describe("plugin hooks", () => {
         { info: { role: "assistant", sessionID: "session-a", id: "ma" }, parts: [aPart] },
       ]))
 
-      expect(bPart.text).toBe("Session B raw SECRET_TOKEN")
-      expect(aPart.text).toBe("Session A raw SECRET_TOKEN")
+      expect(bPart.text).toBe("Maid SECRET_TOKEN")
+      expect(aPart.text).toBe("Maid SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "session-b", messageID: "mb", partID: "pb" }, "Maid SECRET_TOKEN")).toBe("Session B raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "session-b", messageID: "mb", partID: "pb" }, "Maid SECRET_TOKEN")).toBeUndefined()
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "session-a", messageID: "ma", partID: "pa" }, "Maid SECRET_TOKEN")).toBe("Session A raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "session-a", messageID: "ma", partID: "pa" }, "Maid SECRET_TOKEN")).toBeUndefined()
       expect(prompts).toBe(2)
     })
   })
@@ -1438,7 +1453,9 @@ describe("plugin hooks", () => {
       expect(first.text).toBe("Maid 1 SECRET_TOKEN")
       expect(second.text).toBe("Maid 2 SECRET_TOKEN")
       expect(firstPart.text).toBe("Maid 1 SECRET_TOKEN")
-      expect(secondPart.text).toBe("Second raw SECRET_TOKEN")
+      expect(secondPart.text).toBe("Maid 2 SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid 2 SECRET_TOKEN")).toBe("Second raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid 2 SECRET_TOKEN")).toBeUndefined()
       expect(prompts).toBe(2)
     })
   })
@@ -1481,7 +1498,9 @@ describe("plugin hooks", () => {
 
       expect(first.text).toBe("Maid 1 SECRET_TOKEN")
       expect(second.text).toBe("Maid 2 SECRET_TOKEN")
-      expect(part.text).toBe("Second raw SECRET_TOKEN")
+      expect(part.text).toBe("Maid 2 SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid 2 SECRET_TOKEN")).toBe("Second raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid 2 SECRET_TOKEN")).toBeUndefined()
     })
   })
 
@@ -1510,14 +1529,14 @@ describe("plugin hooks", () => {
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [firstPart] }]))
       await hooks["experimental.text.complete"]?.(input, second)
 
-      expect(first.text).toBe("Raw SECRET_TOKEN")
-      expect(firstPart.text).toBe("Raw SECRET_TOKEN")
+      expect(first.text).toBe(DISPLAY_ONLY_FALLBACK)
+      expect(firstPart.text).toBe(DISPLAY_ONLY_FALLBACK)
       expect(second.text).toBe("Maid SECRET_TOKEN")
       expect(prompts).toBe(2)
     })
   })
 
-  test("failed rewrites show original text while preserving display-only sidecar originals", async () => {
+  test("failed rewrites show fallback text while preserving display-only sidecar originals", async () => {
     await isolated(async (dir) => {
       let prompts = 0
       const hooks = await MaidPlugin(ctx({
@@ -1535,7 +1554,7 @@ describe("plugin hooks", () => {
       const input = { sessionID: "user-session", messageID: "m", partID: "p" }
       const first = { text: "Raw SECRET_TOKEN" }
       const repeated = { text: DISPLAY_ONLY_FALLBACK }
-      const part = { type: "text", id: "p", text: "Raw SECRET_TOKEN" }
+      const part = { type: "text", id: "p", text: DISPLAY_ONLY_FALLBACK }
       const compacted = { context: [] as string[] }
 
       await hooks["experimental.text.complete"]?.(input, first)
@@ -1543,11 +1562,11 @@ describe("plugin hooks", () => {
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
       await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
 
-      expect(first.text).toBe("Raw SECRET_TOKEN")
+      expect(first.text).toBe(DISPLAY_ONLY_FALLBACK)
       expect(repeated.text).toBe(DISPLAY_ONLY_FALLBACK)
-      expect(part.text).toBe("Raw SECRET_TOKEN")
-      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Raw SECRET_TOKEN")).toBe("Raw SECRET_TOKEN")
-      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Raw SECRET_TOKEN")).toBeUndefined()
+      expect(part.text).toBe(DISPLAY_ONLY_FALLBACK)
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBeUndefined()
       expect(compacted.context.join("\n")).not.toContain("Raw SECRET_TOKEN")
       expect(prompts).toBe(1)
     })
@@ -1685,7 +1704,7 @@ describe("plugin hooks", () => {
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
       await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
 
-      expect(output.text).toBe("New raw SECRET_TOKEN")
+      expect(output.text).toBe(DISPLAY_ONLY_FALLBACK)
       expect(compacted.context.join("\n")).not.toContain("Old raw SECRET_TOKEN")
       expect(compacted.context.join("\n")).not.toContain("New raw SECRET_TOKEN")
     })
@@ -1726,17 +1745,18 @@ describe("plugin hooks", () => {
         headers: await providerHeaders(hooks),
         body: providerBody(),
       }).then((res) => res.text())
-      const output = { text: "Raw SECRET_TOKEN" }
+      const output = { text: DISPLAY_ONLY_FALLBACK }
 
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
       const part = { type: "text", id: "p", text: output.text }
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
 
-      expect(response).toContain("Raw SECRET_TOKEN")
-      expect(response).not.toContain(DISPLAY_ONLY_FALLBACK)
-      expect(output.text).toBe("Raw SECRET_TOKEN")
-      expect(part.text).toBe("Raw SECRET_TOKEN")
-      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Raw SECRET_TOKEN")).toBeUndefined()
+      expect(response).toContain(DISPLAY_ONLY_FALLBACK)
+      expect(response).not.toContain("Raw SECRET_TOKEN")
+      expect(output.text).toBe(DISPLAY_ONLY_FALLBACK)
+      expect(part.text).toBe(DISPLAY_ONLY_FALLBACK)
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBeUndefined()
       expect(prompts).toBe(1)
     })
   })
@@ -1777,13 +1797,13 @@ describe("plugin hooks", () => {
         headers: await providerHeaders(hooks),
         body: providerBody(),
       })
-      const providerOutput = { text: "Raw SECRET_TOKEN" }
+      const providerOutput = { text: DISPLAY_ONLY_FALLBACK }
       const retryOutput = { text: "Raw SECRET_TOKEN" }
 
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, providerOutput)
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, retryOutput)
 
-      expect(providerOutput.text).toBe("Raw SECRET_TOKEN")
+      expect(providerOutput.text).toBe(DISPLAY_ONLY_FALLBACK)
       expect(retryOutput.text).toBe("Maid SECRET_TOKEN")
       expect(prompts).toBe(2)
     })
@@ -1793,7 +1813,7 @@ describe("plugin hooks", () => {
     await isolated(async (dir) => {
       let directPrompts = 0
       globalThis.__ohMyOpencodeMaidResponses = fakeResponseStore({
-        putOriginal() {
+        putDisplayOriginal() {
           throw new Error("write failed")
         },
       })
@@ -1993,7 +2013,7 @@ describe("plugin hooks", () => {
     })
   })
 
-  test("persists originals across plugin re-instantiation", async () => {
+  test("persists originals as display-only across plugin re-instantiation", async () => {
     await isolated(async (dir) => {
       const first = await MaidPlugin(ctx({
         async create() {
@@ -2016,11 +2036,13 @@ describe("plugin hooks", () => {
       await second["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
 
       expect(output.text).toBe("Maid SECRET_TOKEN")
-      expect(part.text).toBe("Raw SECRET_TOKEN")
+      expect(part.text).toBe("Maid SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid SECRET_TOKEN")).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid SECRET_TOKEN")).toBeUndefined()
     })
   })
 
-  test("compaction context includes persisted originals", async () => {
+  test("compaction context excludes persisted originals", async () => {
     await isolated(async (dir) => {
       const hooks = await MaidPlugin(ctx({
         async create() {
@@ -2040,12 +2062,12 @@ describe("plugin hooks", () => {
       await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
 
       expect(output.text).toBe("Maid SECRET_TOKEN")
-      expect(compacted.context.join("\n")).toContain("Raw SECRET_TOKEN")
+      expect(compacted.context.join("\n")).not.toContain("Raw SECRET_TOKEN")
       expect(compacted.context.join("\n")).not.toContain("Maid SECRET_TOKEN")
     })
   })
 
-  test("hydrates rewrite context from persisted originals after plugin restart", async () => {
+  test("does not hydrate rewrite context from persisted originals after plugin restart", async () => {
     await isolated(async (dir) => {
       await mkdir(path.dirname(userConfigFile()), { recursive: true })
       await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
@@ -2075,15 +2097,15 @@ describe("plugin hooks", () => {
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m3", partID: "p3" }, nextOutput)
 
       expect(output.text).toBe("Current maid SECRET_TOKEN")
-      expect(prompts[0]).toContain("Previous context, reference only")
+      expect(prompts[0]).not.toContain("Previous context, reference only")
       expect(prompts[0]).not.toContain("Persisted raw SECRET_TOKEN")
-      expect(prompts[0]).toContain("Persisted maid SECRET_TOKEN")
+      expect(prompts[0]).not.toContain("Persisted maid SECRET_TOKEN")
       expect(prompts[0]).toContain("Current request")
       expect(nextOutput.text).toBe("Next maid SECRET_TOKEN")
       expect(prompts[1]).toContain("Previous context, reference only")
       expect(prompts[1]).not.toContain("Persisted raw SECRET_TOKEN")
       expect(prompts[1]).not.toContain("Current raw SECRET_TOKEN")
-      expect(prompts[1]).toContain("Persisted maid SECRET_TOKEN")
+      expect(prompts[1]).not.toContain("Persisted maid SECRET_TOKEN")
       expect(prompts[1]).toContain("Current maid SECRET_TOKEN")
       expect(prompts[1]).not.toContain("Current request")
       expect(prompts[1]).toContain("Next request")
@@ -2164,12 +2186,12 @@ describe("plugin hooks", () => {
       expect(part.text).toBe("New visible SECRET_TOKEN")
       expect(compactedDuring.context.join("\n")).not.toContain("Old raw SECRET_TOKEN")
       expect(output.text).toBe("New visible SECRET_TOKEN")
-      expect(compactedAfter.context.join("\n")).toContain("New raw SECRET_TOKEN")
+      expect(compactedAfter.context.join("\n")).not.toContain("New raw SECRET_TOKEN")
       expect(compactedAfter.context.join("\n")).not.toContain("Old raw SECRET_TOKEN")
     })
   })
 
-  test("skips user, non-text, hidden, and missing-id message parts during restore", async () => {
+  test("leaves user, non-text, hidden, missing-id, and legacy rows untouched during message serialization", async () => {
     await isolated(async (dir) => {
       const store = await createResponseStore()
       store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Maid assistant", "Raw assistant")
@@ -2184,6 +2206,7 @@ describe("plugin hooks", () => {
       const missingPartID = { type: "text", text: "Missing part id" }
       const missingMessageID = { type: "text", id: "p", text: "Missing message id" }
       const missingSessionID = { type: "text", id: "p", text: "Missing session id" }
+      const compacted = { context: [] as string[] }
 
       await hooks["experimental.chat.messages.transform"]?.({}, messages([
         { info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [assistantPart] },
@@ -2194,14 +2217,16 @@ describe("plugin hooks", () => {
         { info: { role: "assistant", sessionID: "user-session" }, parts: [missingMessageID] },
         { info: { role: "assistant", id: "m" }, parts: [missingSessionID] },
       ]))
+      await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
 
-      expect(assistantPart.text).toBe("Raw assistant")
+      expect(assistantPart.text).toBe("Maid assistant")
       expect(userPart.text).toBe("User visible")
       expect(nonTextPart.text).toBe("Tool visible")
       expect(hiddenPart.text).toBe("Hidden visible")
       expect(missingPartID.text).toBe("Missing part id")
       expect(missingMessageID.text).toBe("Missing message id")
       expect(missingSessionID.text).toBe("Missing session id")
+      expect(compacted.context.join("\n")).not.toContain("Raw assistant")
     })
   })
 
@@ -2358,7 +2383,7 @@ describe("plugin hooks", () => {
     })
   })
 
-  test("restores unrelated messages while a rewrite is still pending", async () => {
+  test("does not restore unrelated legacy messages while a rewrite is still pending", async () => {
     await isolated(async (dir) => {
       const store = await createResponseStore()
       store.putOriginal({ directory: dir, sessionID: "other-session", messageID: "m2", partID: "p2" }, "Other visible SECRET_TOKEN", "Other raw SECRET_TOKEN")
@@ -2391,7 +2416,7 @@ describe("plugin hooks", () => {
       release?.()
       await work
 
-      expect(part.text).toBe("Other raw SECRET_TOKEN")
+      expect(part.text).toBe("Other visible SECRET_TOKEN")
       expect(output.text).toBe("Maid SECRET_TOKEN")
     })
   })

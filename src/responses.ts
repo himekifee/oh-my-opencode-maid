@@ -29,7 +29,7 @@ export type ResponseStore = {
   getContextOriginal(key: ResponseKey, visibleText: string): string | undefined
   deleteOriginal(key: ResponseKey): void
   deleteSession(directory: string, sessionID: string): void
-  putPendingProviderOriginal(directory: string, sessionID: string, visibleText: string, originalText: string, displayOnly?: boolean): void
+  putPendingProviderOriginal(directory: string, sessionID: string, visibleText: string, originalText: string): void
   consumePendingProviderOriginal(key: ResponseKey, visibleText: string): PendingProviderOriginal | undefined
   getSessionOriginals(directory: string, sessionID: string, limit: number): SessionOriginal[]
   close(): void
@@ -213,10 +213,9 @@ export async function createResponseStore(): Promise<ResponseStore> {
     pruneExpiredPending.run({ $ttl: PENDING_PROVIDER_ORIGINAL_TTL_SECONDS })
     const row = selectPending.get({ $directory: key.directory, $session_id: key.sessionID, $visible_text: visibleText, $ttl: PENDING_PROVIDER_ORIGINAL_TTL_SECONDS })
     if (!record(row) || typeof row.id !== "number" || typeof row.original_text !== "string") return undefined
-    const displayOnly = row.display_only === 1
-    writeOriginal(key, visibleText, row.original_text, displayOnly)
+    writeOriginal(key, visibleText, row.original_text, true)
     deletePending.run({ $id: row.id })
-    return { originalText: row.original_text, displayOnly }
+    return { originalText: row.original_text, displayOnly: true }
   })
 
   const deleteSessionRows = db.transaction((directory: string, sessionID: string) => {
@@ -249,8 +248,8 @@ export async function createResponseStore(): Promise<ResponseStore> {
     deleteSession(directory, sessionID) {
       deleteSessionRows(directory, sessionID)
     },
-    putPendingProviderOriginal(directory, sessionID, visibleText, originalText, displayOnly) {
-      insertPending.run({ $directory: directory, $session_id: sessionID, $visible_text: visibleText, $original_text: originalText, $display_only: displayOnly ? 1 : 0 })
+    putPendingProviderOriginal(directory, sessionID, visibleText, originalText) {
+      insertPending.run({ $directory: directory, $session_id: sessionID, $visible_text: visibleText, $original_text: originalText, $display_only: 1 })
       pruneExpiredPending.run({ $ttl: PENDING_PROVIDER_ORIGINAL_TTL_SECONDS })
       pruneOverflowPending.run({ $max: MAX_PENDING_PROVIDER_ORIGINALS })
     },

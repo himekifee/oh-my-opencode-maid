@@ -5,7 +5,7 @@ import { MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig, tog
 import { FAILURE, finalResult, HANDOFF, handoffSystemPrompt, maidAgentPrompt, split, type FinalTextResult, type RewriteContextEntry } from "./rewrite"
 import { REWRITE_AGENT, SESSION_META_LOOKUP_FAILED, createDeltaSuppressor, disabledTools, formatModel, getSessionMeta, resolveModel, runMaid, type ModelSpec, type SessionMeta } from "./opencode"
 import { PROVIDER_REWRITE_HEADER, createProviderFetch, installProviderRewrite, installPublicStreamGate, uninstallProviderRewrite, uninstallPublicStreamGate } from "./patch"
-import { createResponseStore, type PendingProviderOriginal, type ResponseKey, type ResponseStore, type SessionOriginal } from "./responses"
+import { createResponseStore, type PendingProviderOriginal, type ResponseKey, type ResponseStore } from "./responses"
 import { DISPLAY_ONLY_FALLBACK } from "./fallback"
 
 type MutableConfig = {
@@ -80,8 +80,6 @@ const permission = {
 } as const
 
 const MAX_DRAFT = 200_000
-const MAX_COMPACTION_ORIGINALS = 50
-const MAX_COMPACTION_ORIGINAL_CHARS = 8_000
 const PROVIDER_TOKEN_TTL = 10 * 60 * 1000
 const TOGGLE_COMMAND = "maid-rewrite-toggle"
 
@@ -193,23 +191,6 @@ function completedStore() {
   return next
 }
 
-function truncateOriginal(text: string) {
-  if (text.length <= MAX_COMPACTION_ORIGINAL_CHARS) return text
-  return `${text.slice(0, MAX_COMPACTION_ORIGINAL_CHARS)}\n[truncated]`
-}
-
-function compactionContext(originals: SessionOriginal[]) {
-  const selected = originals.slice(-MAX_COMPACTION_ORIGINALS)
-  const blocks = selected.map((item) => [
-    `Message ${item.messageID}, part ${item.partID}:`,
-    truncateOriginal(item.originalText),
-  ].join("\n"))
-  return [
-    "oh-my-opencode-maid original assistant text before visible roleplay rewrites. Use this for factual compaction context instead of the rewritten visible style.",
-    ...blocks,
-  ].join("\n\n")
-}
-
 const MaidPlugin: Plugin = async (ctx) => {
   const cfg = await loadConfig(ctx.directory)
   let responses = cfg.enabled ? (globalThis.__ohMyOpencodeMaidResponses ??= await createResponseStore().catch(() => undefined)) : undefined
@@ -290,15 +271,6 @@ const MaidPlugin: Plugin = async (ctx) => {
       if (index >= 0) entries.splice(index, 1)
       entries.push(entry)
     }
-    try {
-      const originals = responses?.getSessionOriginals(ctx.directory, id, limit) ?? []
-      for (const item of originals) pushEntry({
-        originalText: item.originalText,
-        visibleText: item.visibleText,
-      })
-    } catch {
-      // Persisted context is best-effort; in-memory history is still usable.
-    }
     for (const entry of remembered ?? []) pushEntry(entry)
     const out = entries.slice(-limit)
     return out.length ? out : undefined
@@ -307,11 +279,11 @@ const MaidPlugin: Plugin = async (ctx) => {
     if (cfg.rewrite_context_size <= 1 || !id || isDeletedSession(id) || isGuardedRewrite(id) || passthrough.has(id) || isCompacting(id)) return undefined
     return userPrompts.get(sessionKey(id))
   }
-  const rememberSuccessfulRewrite = (id: string | undefined, originalText: string, visibleText: string, userPrompt?: string) => {
+  const rememberSuccessfulRewrite = (id: string | undefined, visibleText: string, userPrompt?: string) => {
     if (cfg.rewrite_context_size <= 1 || !id || isDeletedSession(id) || isGuardedRewrite(id) || passthrough.has(id) || isCompacting(id)) return
     const entry: RewriteContextEntry = {
       ...(userPrompt ? { userPrompt } : {}),
-      originalText,
+      originalText: visibleText,
       visibleText,
     }
     rewriteHistory.set(sessionKey(id), [...(rewriteHistory.get(sessionKey(id)) ?? []), entry].slice(-(REWRITE_CONTEXT_MAX - 1)))
@@ -406,11 +378,6 @@ const MaidPlugin: Plugin = async (ctx) => {
     providerTokens.delete(token)
     return item?.directory === ctx.directory ? item.sessionID : undefined
   }
-  const storeOriginal = (input: RewritePartKey, visibleText: string, originalText: string) => {
-    if (!responses) throw new Error("response store is unavailable")
-    if (!originalText) return
-    responses.putOriginal(responseKey(input), visibleText, originalText)
-  }
   const storeDisplayOriginal = (input: RewritePartKey, visibleText: string, originalText: string) => {
     if (!responses) throw new Error("response store is unavailable")
     if (!originalText) return
@@ -420,21 +387,16 @@ const MaidPlugin: Plugin = async (ctx) => {
     const prefix = `${ctx.directory}/${sessionID}/`
     for (const current of completed.keys()) if (current.startsWith(prefix)) completed.delete(current)
   }
-  const rememberProviderOriginal = (sessionID: string | undefined, visible: string, original: string, displayOnly = false) => {
+  const rememberProviderOriginal = (sessionID: string | undefined, visible: string, original: string) => {
     if (!responses) throw new Error("response store is unavailable")
     if (!sessionID || isDeletedSession(sessionID) || !original) return
-    responses.putPendingProviderOriginal(ctx.directory, sessionID, visible, original, displayOnly)
+    responses.putPendingProviderOriginal(ctx.directory, sessionID, visible, original)
   }
   const consumeProviderOriginal = (input: RewritePartKey, visible: string) => responses?.consumePendingProviderOriginal(responseKey(input), visible)
   const pendingPrefix = (id: string) => `${ctx.directory}/${id}/`
   const deletePendingForSession = (id: string) => {
     const prefix = pendingPrefix(id)
     for (const current of pending.keys()) if (current.startsWith(prefix)) pending.delete(current)
-  }
-  const hasPendingForSession = (id: string) => {
-    const prefix = pendingPrefix(id)
-    for (const current of pending.keys()) if (current.startsWith(prefix)) return true
-    return false
   }
   const replayMatches = (replay: CompletedReplay, text: string) => replay.originalText === text || replay.visibleText === text
   const rewrite = async (draft: string, parentID?: string, capturedUserPrompt = currentPromptContext(parentID)) => {
@@ -471,13 +433,13 @@ const MaidPlugin: Plugin = async (ctx) => {
     const capturedUserPrompt = currentPromptContext(sessionID)
     const result = await rewrite(draft, sessionID, capturedUserPrompt)
     if (!isEnabled()) return original
-    const visible = result.rewritten ? result.text : original
+    const visible = result.rewritten ? result.text : DISPLAY_ONLY_FALLBACK
     try {
-      rememberProviderOriginal(sessionID, visible, original, !result.rewritten)
+      rememberProviderOriginal(sessionID, visible, original)
     } catch {
       return DISPLAY_ONLY_FALLBACK
     }
-    if (result.rewritten) rememberSuccessfulRewrite(sessionID, original, visible, capturedUserPrompt)
+    if (result.rewritten) rememberSuccessfulRewrite(sessionID, visible, capturedUserPrompt)
     return visible
   }
   const hook = {
@@ -606,55 +568,15 @@ const MaidPlugin: Plugin = async (ctx) => {
       output.system.push(handoffSystemPrompt())
     },
 
-    "experimental.chat.messages.transform": async (_input, output) => {
-      if (!isEnabled() || !responses) return
-      for (const message of output.messages) {
-        const info = message.info
-        if (stringField(info, "role") !== "assistant") continue
-        const infoSessionID = stringField(info, "sessionID")
-        if (infoSessionID && isGuardedRewrite(infoSessionID)) continue
-        if (infoSessionID && await isPassthrough(infoSessionID)) continue
-        if (infoSessionID && isDeletedSession(infoSessionID)) continue
-        if (infoSessionID && isGuardedRewrite(infoSessionID)) continue
-        const messageID = stringField(info, "id") ?? stringField(info, "messageID")
-        for (const part of message.parts) {
-          if (!record(part)) continue
-          if (part.type !== "text" || typeof part.text !== "string") continue
-          const sessionID = infoSessionID ?? stringField(part, "sessionID")
-          if (!sessionID || await skipSession(sessionID) || isGuardedRewrite(sessionID)) continue
-          const partMessageID = messageID ?? stringField(part, "messageID")
-          const partID = stringField(part, "id") ?? stringField(part, "partID")
-          if (!partMessageID || !partID) continue
-          let original: string | undefined
-          try {
-            original = responses.getContextOriginal({
-              directory: ctx.directory,
-              sessionID,
-              messageID: partMessageID,
-              partID,
-            }, part.text)
-          } catch {
-            continue
-          }
-          if (original !== undefined) part.text = original
-        }
-      }
+    "experimental.chat.messages.transform": async () => {
+      return
     },
 
-    "experimental.session.compacting": async (input, output) => {
+    "experimental.session.compacting": async (input) => {
       if (!isEnabled()) return
       if (await skipSession(input.sessionID)) return
       if (isGuardedRewrite(input.sessionID)) return
       markCompacting(input.sessionID)
-      if (!responses) return
-      if (hasPendingForSession(input.sessionID)) return
-      try {
-        const originals = responses.getSessionOriginals(ctx.directory, input.sessionID, MAX_COMPACTION_ORIGINALS)
-        if (originals.length === 0) return
-        output.context.push(compactionContext(originals))
-      } catch {
-        return
-      }
     },
 
     "experimental.compaction.autocontinue": async (input) => {
@@ -731,7 +653,7 @@ const MaidPlugin: Plugin = async (ctx) => {
         return
       }
       if (providerOriginal !== undefined) {
-        if (!providerOriginal.displayOnly) completed.set(done, { originalText: providerOriginal.originalText, visibleText: item.text })
+        if (providerOriginal.originalText !== item.text) completed.set(done, { originalText: item.text, visibleText: item.text })
         output.text = item.text
         return
       }
@@ -757,19 +679,19 @@ const MaidPlugin: Plugin = async (ctx) => {
           if (!isEnabled()) return { text: item.text, rewritten: false }
           if (result.rewritten) {
             try {
-              storeOriginal(input, result.text, item.text)
+              storeDisplayOriginal(input, result.text, item.text)
             } catch {
               return { text: FAILURE, rewritten: false }
             }
-            rememberSuccessfulRewrite(input.sessionID, item.text, result.text, capturedUserPrompt)
+            rememberSuccessfulRewrite(input.sessionID, result.text, capturedUserPrompt)
             completed.set(done, { originalText: item.text, visibleText: result.text })
           } else {
             try {
-              storeDisplayOriginal(input, item.text, item.text)
+              storeDisplayOriginal(input, DISPLAY_ONLY_FALLBACK, item.text)
             } catch {
               return { text: FAILURE, rewritten: false }
             }
-            return { text: item.text, rewritten: false }
+            return { text: DISPLAY_ONLY_FALLBACK, rewritten: false }
           }
           return result
         })

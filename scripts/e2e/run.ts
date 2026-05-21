@@ -83,8 +83,7 @@ function rootSessionID(stderr: string): string | undefined {
 }
 
 // Pull the visible assistant text opencode actually persisted. `--pure` skips
-// the plugin so its messages.transform hook cannot swap the stored visible text
-// back to the original — we want exactly what a user would have seen.
+// runtime plugin side effects while preserving the transcript exactly as the user saw it.
 function assistantText(exportJson: string): string {
   const data = JSON.parse(exportJson) as {
     messages?: Array<{ info?: { role?: string }; parts?: Array<{ type?: string; text?: unknown }> }>

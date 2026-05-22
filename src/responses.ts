@@ -25,6 +25,7 @@ export type PendingProviderOriginal = {
 export type ResponseStore = {
   putOriginal(key: ResponseKey, visibleText: string, originalText: string): void
   putDisplayOriginal(key: ResponseKey, visibleText: string, originalText: string): void
+  hasOriginal(key: ResponseKey, visibleText: string): boolean
   getOriginal(key: ResponseKey, visibleText: string): string | undefined
   getContextOriginal(key: ResponseKey, visibleText: string): string | undefined
   deleteOriginal(key: ResponseKey): void
@@ -124,6 +125,15 @@ export async function createResponseStore(): Promise<ResponseStore> {
   `)
   const select = db.query(`
     SELECT text FROM responses
+    WHERE directory = $directory
+      AND session_id = $session_id
+      AND message_id = $message_id
+      AND part_id = $part_id
+      AND visible_text = $visible_text
+    LIMIT 1
+  `)
+  const selectExists = db.query(`
+    SELECT 1 AS found FROM responses
     WHERE directory = $directory
       AND session_id = $session_id
       AND message_id = $message_id
@@ -231,6 +241,9 @@ export async function createResponseStore(): Promise<ResponseStore> {
     },
     putDisplayOriginal(key, visibleText, originalText) {
       writeOriginal(key, visibleText, originalText, true)
+    },
+    hasOriginal(key, visibleText) {
+      return Boolean(selectExists.get({ ...params(key), $visible_text: visibleText }))
     },
     getOriginal(key, visibleText) {
       const row = select.get({ ...params(key), $visible_text: visibleText })

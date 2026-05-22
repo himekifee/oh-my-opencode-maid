@@ -60,7 +60,7 @@
 - **`EventEmitter.prototype.emit`** —— *进程级*。运行时里每一次 `emit("event", …)`（OpenCode 核心和任何其它插件）都会经过一个过滤器，把能露出来的原始文本增量剥掉。这是范围最大的补丁，也是最可能和别的插件相互影响、或在 OpenCode 升级后行为漂移的一处。
 - **`globalThis.postMessage`**（存在时）—— 从 RPC 消息里清掉原始增量。
 
-当找不到公开的 client 形状时，它还会读一个**私有 SDK 字段**（`client._client`）作为兜底，以便调用 `session.create` / `session.prompt` / `session.delete`。这属于内部接口，OpenCode 升级时可能失效；一旦失效，插件会退化为直接显示未改写的草稿，而不是硬崩。
+当找不到公开的 client 形状时，它还会读一个**私有 SDK 字段**（`client._client`）作为兜底，以便调用 `session.create` / `session.prompt` / `session.delete`。这属于内部接口，OpenCode 升级时可能失效；一旦失效，插件会用中性兜底文本 fail closed，而不是暴露未追踪的原始草稿。
 
 补丁按项目目录引用计数，最后一个实例卸载或被设为 `enabled: false` 时会被拆掉。原文以未加密形式存放在 `0700` 目录下的 `0600` SQLite 文件里（见 [持久化与上下文压缩](#-持久化与上下文压缩)）。如果这些在你的环境里不可接受，把 `"enabled": false` 设上 —— 所有补丁都会被跳过或移除。
 
@@ -146,8 +146,8 @@ bun run build
 
 - 改写失败时，会从那个旁路库里把抽走的原文捞回来，**只**在本地 TUI 弹窗里给你看。
 - 注册 `/maid-original`，用来重新打开当前会话最近一次的旁路原文。
-- 改写成功的原文只保留在旁路库的仅供展示数据里。如果 TUI 暴露了兼容的装饰钩子，TUI 入口会请求宿主在可见回复旁边渲染一个本地折叠的 *Original* thought block。
-- 如果这个宿主装饰钩子不存在或调用失败，成功改写的原文路径会直接不做任何事。没有 renderer 兜底、toast 或提示路径。
+- 改写成功的原文只保留在旁路库的仅供展示数据里。如果宿主渲染树可用，TUI 会在可见回复前面注入一个同 realm 的 OpenTUI 行，显示本地折叠的 `+ Original Draft Content` 块。
+- 点击这个 renderer 行时，才会从旁路库读取原文并在本地内联展开；再次点击会折叠，并清掉渲染本地状态里的原文。如果 renderer 注入不可用或失败，TUI 不会显示替代装饰或 overlay；`/maid-original` 仍然是本地恢复命令。
 - 这个 TUI 装饰只存在于本地渲染层：不改动消息、不伪造推理片段，也不会让这些原文进入导出内容或对话上下文。
 
 ## 🧠 持久化与上下文压缩
@@ -170,7 +170,7 @@ bun run typecheck
 bun run build
 ```
 
-运行时自测建议在 tmux 里做，把 OpenCode 指到构建好的 `dist/index.js`：发一条普通提示，看看原始草稿会不会一闪而过，确认最终回复确实照着 `roleplay_prompt` 走；再运行 `/maid-rewrite-toggle`，确认改写会立刻关闭和重新打开，同时持久化 `enabled` 并显示对应的状态提示。再特意触发一次改写失败，确认抽走的原文只在「仅供展示」记录成功落库之后才露面。还要验证落库失败的路径会乖乖输出中性兜底文字或 `FAILURE`，而不是把没被追踪的原文漏出来。启用 `dist/tui.js` 后，有宿主装饰钩子时，成功改写应该只显示本地折叠的 *Original* thought block；没有这个钩子时，成功改写的原文不应该出现任何 UI。兜底记录应该打开本地弹窗；`/maid-original` 也应该能重新打开旁路原文，且不动会话历史。
+运行时自测建议在 tmux 里做，把 OpenCode 指到构建好的 `dist/index.js`：发一条普通提示，看看原始草稿会不会一闪而过，确认最终回复确实照着 `roleplay_prompt` 走；再运行 `/maid-rewrite-toggle`，确认改写会立刻关闭和重新打开，同时持久化 `enabled` 并显示对应的状态提示。再特意触发一次改写失败，确认抽走的原文只在「仅供展示」记录成功落库之后才露面。还要验证落库失败的路径会乖乖输出中性兜底文字或 `FAILURE`，而不是把没被追踪的原文漏出来。启用 `dist/tui.js` 后，如果宿主渲染树可用，成功改写应该显示一个本地折叠的 `+ Original Draft Content` renderer 行；点击后在本地内联展开，再点一次折叠，而且原文绝不能进入消息历史、日志、导出、压缩、宿主装饰提示或 overlay。兜底记录应该打开本地弹窗；`/maid-original` 也应该能重新打开旁路原文，且不动会话历史。
 
 ## 📜 许可
 

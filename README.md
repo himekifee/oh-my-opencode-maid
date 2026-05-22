@@ -59,7 +59,7 @@ This plugin is deliberately invasive. With `enabled: true` it patches, for the l
 - **`EventEmitter.prototype.emit`** — *process-wide*. Every `emit("event", …)` in the runtime (OpenCode core and any other plugin) passes through a filter that strips reachable raw-text deltas. This is the broadest patch and the one most likely to interact with other plugins or shift behavior across an OpenCode upgrade.
 - **`globalThis.postMessage`** (when present) — to scrub raw deltas from RPC messages.
 
-It also reads a **private SDK field** (`client._client`) as a fallback when the public client shape isn't found, in order to reach `session.create` / `session.prompt` / `session.delete`. That is internal surface and may break on an OpenCode upgrade; if it does, the plugin degrades to showing the un-rewritten draft rather than failing hard.
+It also reads a **private SDK field** (`client._client`) as a fallback when the public client shape isn't found, in order to reach `session.create` / `session.prompt` / `session.delete`. That is internal surface and may break on an OpenCode upgrade; if it does, the plugin fails closed with neutral fallback text rather than exposing an untracked draft.
 
 Patches are reference-counted per project directory and torn down when the last instance unloads or is set to `enabled: false`. Originals are stored unencrypted in a `0600` SQLite file under a `0700` directory (see [Persistence & compaction](#-persistence--compaction)). If any of this is unacceptable in your environment, set `"enabled": false` — every patch is then skipped or removed.
 
@@ -144,8 +144,8 @@ With `dist/tui.js` active:
 
 - Rewrite failures resolve the stripped original from the sidecar store and show it in a **local** TUI dialog only.
 - Registers `/maid-original` to reopen the latest sidecar original for the current session.
-- Successful rewrite originals stay in the sidecar as display-only data. If the TUI exposes a compatible decoration hook, the entry asks the host to render a local collapsed *Original* thought block beside the visible reply.
-- If that host decoration hook is unavailable or fails, the successful-rewrite original path does nothing. There is no renderer fallback, toast, or hint path.
+- Successful rewrite originals stay in the sidecar as display-only data. When the host renderer tree is available, the TUI injects a host-realm OpenTUI row before the visible reply that starts as a local collapsed `+ Original Draft Content` block.
+- Clicking that renderer row fetches the original from the sidecar and expands it inline; clicking again collapses it and clears the raw text from the render-local row state. If renderer injection is unavailable or fails, no substitute decoration or overlay is shown; `/maid-original` remains the local recovery command.
 - The TUI decoration is render-local: it does not mutate messages, synthesize reasoning parts, or expose those originals to exported conversation context.
 
 ## 🧠 Persistence & compaction
@@ -168,7 +168,7 @@ bun run typecheck
 bun run build
 ```
 
-Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled` and showing the matching status toast. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, successful rewrites should show only a local collapsed *Original* thought block when the host decoration hook is available; without that hook, no successful-rewrite original UI should appear. Fallback rows should open a local dialog, and `/maid-original` should reopen the sidecar original without changing session history.
+Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled` and showing the matching status toast. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, successful rewrites should show a local collapsed `+ Original Draft Content` renderer row when the host tree is available; it should expand inline on click, collapse on the next click, and never put raw original text into message history, logs, export, compaction, host decoration hints, or overlays. Fallback rows should open a local dialog, and `/maid-original` should reopen the sidecar original without changing session history.
 
 ## 📜 License
 

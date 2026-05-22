@@ -134,6 +134,9 @@ function fakeResponseStore(overrides: Partial<ResponseStore>): ResponseStore {
   return {
     putOriginal() {},
     putDisplayOriginal() {},
+    hasOriginal() {
+      return false
+    },
     getOriginal() {
       return undefined
     },
@@ -2302,6 +2305,20 @@ describe("plugin hooks", () => {
       })
 
       expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal(ref, "Maid SECRET_TOKEN")).toBeUndefined()
+    })
+  })
+
+  test("response store checks original existence without returning text", async () => {
+    await isolated(async (dir) => {
+      const store = await createResponseStore()
+      const ref = { directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }
+
+      expect(store.hasOriginal(ref, "Maid SECRET_TOKEN")).toBe(false)
+      store.putDisplayOriginal(ref, "Maid SECRET_TOKEN", "Raw SECRET_TOKEN")
+
+      expect(store.hasOriginal(ref, "Maid SECRET_TOKEN")).toBe(true)
+      expect(store.hasOriginal(ref, "Other visible")).toBe(false)
+      store.close()
     })
   })
 

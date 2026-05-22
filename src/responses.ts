@@ -148,7 +148,7 @@ export async function createResponseStore(): Promise<ResponseStore> {
       AND message_id = $message_id
       AND part_id = $part_id
       AND visible_text = $visible_text
-      AND display_only = 0
+      AND visible_text != $fallback_visible_text
     LIMIT 1
   `)
   const insertPending = db.query(`
@@ -251,7 +251,7 @@ export async function createResponseStore(): Promise<ResponseStore> {
       return row.text
     },
     getContextOriginal(key, visibleText) {
-      const row = selectContext.get({ ...params(key), $visible_text: visibleText })
+      const row = selectContext.get({ ...params(key), $visible_text: visibleText, $fallback_visible_text: DISPLAY_ONLY_FALLBACK })
       if (!record(row) || typeof row.text !== "string") return undefined
       return row.text
     },

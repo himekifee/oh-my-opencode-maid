@@ -452,6 +452,31 @@ const MaidPlugin: Plugin = async (ctx) => {
     if (result.rewritten) rememberSuccessfulRewrite(sessionID, visible, capturedUserPrompt)
     return visible
   }
+  const useContextOriginals = async (output: unknown) => {
+    if (!responses || !record(output) || !Array.isArray(output.messages)) return
+    const skipped = new Map<string, boolean>()
+    for (const message of output.messages) {
+      if (!record(message)) continue
+      const info = record(message.info) ? message.info : undefined
+      if (stringField(info, "role") !== "assistant" || !Array.isArray(message.parts)) continue
+      for (const part of message.parts) {
+        if (!record(part) || part.type !== "text") continue
+        const visibleText = stringField(part, "text")
+        const sessionID = stringField(part, "sessionID") ?? stringField(info, "sessionID")
+        const messageID = stringField(part, "messageID") ?? stringField(info, "id")
+        const partID = stringField(part, "id")
+        if (!visibleText || !sessionID || !messageID || !partID) continue
+        let skip = skipped.get(sessionID)
+        if (skip === undefined) {
+          skip = await skipSession(sessionID)
+          skipped.set(sessionID, skip)
+        }
+        if (skip) continue
+        const original = responses.getContextOriginal(responseKey({ sessionID, messageID, partID }), visibleText)
+        if (original !== undefined) part.text = original
+      }
+    }
+  }
   const hook = {
     owner: ctx.directory,
     active: () => rewriteScope.getStore() === true,
@@ -636,8 +661,10 @@ const MaidPlugin: Plugin = async (ctx) => {
       appendHandoffSystemPrompt(output.system)
     },
 
-    "experimental.chat.messages.transform": async () => {
-      return
+    "experimental.chat.messages.transform": async (_input, output) => {
+      if (!isEnabled()) return
+      if (rewriteScope.getStore() === true) return
+      await useContextOriginals(output)
     },
 
     "experimental.session.compacting": async (input) => {

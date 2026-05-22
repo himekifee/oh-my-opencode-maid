@@ -35,7 +35,9 @@ type FakeRuntime = {
   sizes: string[]
   handlers: Record<string, EventHandler>
   dispose?: () => void | Promise<void>
+  messages: Record<string, string[]>
   parts: Record<string, unknown[]>
+  setRoute(sessionID: string | undefined): void
 }
 
 type FakeBufferCall = {
@@ -219,7 +221,9 @@ function fakeApi(directory: string): FakeRuntime {
   const dialogs: string[] = []
   const sizes: string[] = []
   const handlers: Record<string, EventHandler> = {}
+  const messages: Record<string, string[]> = {}
   const parts: Record<string, unknown[]> = {}
+  const route = { current: { name: "session", params: { sessionID: "user-session" } } as FakeApi["route"]["current"] }
   let dispose: (() => void | Promise<void>) | undefined
   const api = {
     event: {
@@ -235,10 +239,14 @@ function fakeApi(directory: string): FakeRuntime {
       part(messageID: string) {
         return parts[messageID] ?? []
       },
+      session: {
+        messages(sessionID: string) {
+          const ids = messages[sessionID] ?? (sessionID === "user-session" ? Object.keys(parts) : [])
+          return ids.map((id) => ({ id, messageID: id }))
+        },
+      },
     },
-    route: {
-      current: { name: "session", params: { sessionID: "user-session" } },
-    },
+    route,
     ui: {
       DialogAlert(props: { title: string; message: string; onConfirm?: () => void }) {
         dialogs.push(props.message)
@@ -271,7 +279,11 @@ function fakeApi(directory: string): FakeRuntime {
     get dispose() {
       return dispose
     },
+    messages,
     parts,
+    setRoute(sessionID: string | undefined) {
+      route.current = sessionID ? { name: "session", params: { sessionID } } : { name: "home" }
+    },
   }
 }
 
@@ -931,6 +943,205 @@ describe("tui fallback display", () => {
   })
 
   afterEach(resetPluginGlobals)
+
+  test("hydrates restored session messages on initialization with show_original_draft", async () => {
+    await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
+      const store = await createResponseStore()
+      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m1", partID: "p1" }, "Final 1", "Raw 1")
+      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m2", partID: "p2" }, "Final 2", "Raw 2")
+      store.close()
+
+      const runtime = fakeApi(dir)
+      const root = new FakeRenderable({}, { id: "root" })
+      const m1 = new FakeRenderable({}, { id: "message-m1" })
+      const p1 = new FakeTextRenderable({}, { id: "text-p1" })
+      const m2 = new FakeRenderable({}, { id: "message-m2" })
+      const p2 = new FakeTextRenderable({}, { id: "text-p2" })
+
+      root.add(m1)
+      m1.add(p1)
+      root.add(m2)
+      m2.add(p2)
+
+      runtime.api.renderer = fakeRenderer(root)
+
+      runtime.parts["m1"] = [{
+        id: "p1",
+        sessionID: "user-session",
+        messageID: "m1",
+        type: "text",
+        text: "Final 1",
+        time: { start: 1, end: 2 },
+      }]
+      runtime.parts["m2"] = [{
+        id: "p2",
+        sessionID: "user-session",
+        messageID: "m2",
+        type: "text",
+        text: "Final 2",
+        time: { start: 1, end: 2 },
+      }]
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+
+      const row1 = m1.children.find((child) => child.id === "oh-my-opencode-maid-original-m1-p1")
+      expect(row1).toBeDefined()
+      expect(m1.children.indexOf(row1!)).toBe(m1.children.indexOf(p1) - 1)
+
+      const row2 = m2.children.find((child) => child.id === "oh-my-opencode-maid-original-m2-p2")
+      expect(row2).toBeDefined()
+      expect(m2.children.indexOf(row2!)).toBe(m2.children.indexOf(p2) - 1)
+
+      await runtime.dispose?.()
+    })
+  })
+
+  test("retries restored session hydration until restored parts are available", async () => {
+    await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
+      const realSetTimeout = globalThis.setTimeout
+      const realClearTimeout = globalThis.clearTimeout
+      const pendingTimeouts: Array<() => void> = []
+      globalThis.setTimeout = ((handler: TimerHandler) => {
+        if (typeof handler === "function") pendingTimeouts.push(handler as () => void)
+        return pendingTimeouts.length as unknown as ReturnType<typeof setTimeout>
+      }) as typeof setTimeout
+      globalThis.clearTimeout = (() => undefined) as typeof clearTimeout
+      try {
+        const store = await createResponseStore()
+        store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m1", partID: "p1" }, "Final 1", "Raw 1")
+        store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m2", partID: "p2" }, "Final 2", "Raw 2")
+        store.close()
+
+        const runtime = fakeApi(dir)
+        const root = new FakeRenderable({}, { id: "root" })
+        const m1 = new FakeRenderable({}, { id: "message-m1" })
+        const p1 = new FakeTextRenderable({}, { id: "text-p1" })
+        const m2 = new FakeRenderable({}, { id: "message-m2" })
+        const p2 = new FakeTextRenderable({}, { id: "text-p2" })
+
+        root.add(m1)
+        m1.add(p1)
+        root.add(m2)
+        m2.add(p2)
+        runtime.api.renderer = fakeRenderer(root)
+
+        await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+
+        expect(m1.children.some((child) => child.id === "oh-my-opencode-maid-original-m1-p1")).toBe(false)
+        expect(m2.children.some((child) => child.id === "oh-my-opencode-maid-original-m2-p2")).toBe(false)
+
+        runtime.parts["m1"] = [{
+          id: "p1",
+          sessionID: "user-session",
+          messageID: "m1",
+          type: "text",
+          text: "Final 1",
+          time: { start: 1, end: 2 },
+        }]
+        runtime.parts["m2"] = [{
+          id: "p2",
+          sessionID: "user-session",
+          messageID: "m2",
+          type: "text",
+          text: "Final 2",
+          time: { start: 1, end: 2 },
+        }]
+
+        while (pendingTimeouts.length > 0) pendingTimeouts.shift()?.()
+
+        const row1 = m1.children.find((child) => child.id === "oh-my-opencode-maid-original-m1-p1")
+        expect(row1).toBeDefined()
+        expect(m1.children.indexOf(row1!)).toBe(m1.children.indexOf(p1) - 1)
+        expect(renderRow(row1!).calls.some((call) => call.args.includes("Raw 1"))).toBe(false)
+
+        const row2 = m2.children.find((child) => child.id === "oh-my-opencode-maid-original-m2-p2")
+        expect(row2).toBeDefined()
+        expect(m2.children.indexOf(row2!)).toBe(m2.children.indexOf(p2) - 1)
+        expect(renderRow(row2!).calls.some((call) => call.args.includes("Raw 2"))).toBe(false)
+
+        await runtime.dispose?.()
+      } finally {
+        globalThis.setTimeout = realSetTimeout
+        globalThis.clearTimeout = realClearTimeout
+      }
+    })
+  })
+
+  test("hydrates restored session after the active route changes", async () => {
+    await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
+      const realSetInterval = globalThis.setInterval
+      const realClearInterval = globalThis.clearInterval
+      const routeWatchers: Array<() => void> = []
+      globalThis.setInterval = ((handler: TimerHandler) => {
+        if (typeof handler === "function") routeWatchers.push(handler as () => void)
+        return routeWatchers.length as unknown as ReturnType<typeof setInterval>
+      }) as typeof setInterval
+      globalThis.clearInterval = (() => undefined) as typeof clearInterval
+      try {
+        const store = await createResponseStore()
+        store.putDisplayOriginal({ directory: dir, sessionID: "restored-session", messageID: "m1", partID: "p1" }, "Final 1", "Raw 1")
+        store.putDisplayOriginal({ directory: dir, sessionID: "restored-session", messageID: "m2", partID: "p2" }, "Final 2", "Raw 2")
+        store.close()
+
+        const runtime = fakeApi(dir)
+        runtime.setRoute(undefined)
+        const root = new FakeRenderable({}, { id: "root" })
+        const m1 = new FakeRenderable({}, { id: "message-m1" })
+        const p1 = new FakeTextRenderable({}, { id: "text-p1" })
+        const m2 = new FakeRenderable({}, { id: "message-m2" })
+        const p2 = new FakeTextRenderable({}, { id: "text-p2" })
+        root.add(m1)
+        m1.add(p1)
+        root.add(m2)
+        m2.add(p2)
+        runtime.api.renderer = fakeRenderer(root)
+        runtime.messages["restored-session"] = ["m1", "m2"]
+        runtime.parts["m1"] = [{
+          id: "p1",
+          sessionID: "restored-session",
+          messageID: "m1",
+          type: "text",
+          text: "Final 1",
+          time: { start: 1, end: 2 },
+        }]
+        runtime.parts["m2"] = [{
+          id: "p2",
+          sessionID: "restored-session",
+          messageID: "m2",
+          type: "text",
+          text: "Final 2",
+          time: { start: 1, end: 2 },
+        }]
+
+        await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+
+        expect(routeWatchers).toHaveLength(1)
+        expect(m1.children.some((child) => child.id === "oh-my-opencode-maid-original-m1-p1")).toBe(false)
+        expect(m2.children.some((child) => child.id === "oh-my-opencode-maid-original-m2-p2")).toBe(false)
+
+        runtime.setRoute("restored-session")
+        routeWatchers[0]?.()
+
+        const row1 = m1.children.find((child) => child.id === "oh-my-opencode-maid-original-m1-p1")
+        expect(row1).toBeDefined()
+        expect(m1.children.indexOf(row1!)).toBe(m1.children.indexOf(p1) - 1)
+        expect(renderRow(row1!).calls.some((call) => call.args.includes("Raw 1"))).toBe(false)
+
+        const row2 = m2.children.find((child) => child.id === "oh-my-opencode-maid-original-m2-p2")
+        expect(row2).toBeDefined()
+        expect(m2.children.indexOf(row2!)).toBe(m2.children.indexOf(p2) - 1)
+        expect(renderRow(row2!).calls.some((call) => call.args.includes("Raw 2"))).toBe(false)
+
+        await runtime.dispose?.()
+      } finally {
+        globalThis.setInterval = realSetInterval
+        globalThis.clearInterval = realClearInterval
+      }
+    })
+  })
 
   test("default export is a TUI module with a stable id and without a named tui export", async () => {
     const exports = await import("./tui")

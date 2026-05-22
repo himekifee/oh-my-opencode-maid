@@ -19,6 +19,9 @@ type TuiApi = {
       directory: string
     }
     part(messageID: string): ReadonlyArray<unknown>
+    session: {
+      messages(sessionID: string): ReadonlyArray<unknown>
+    }
   }
   route: {
     readonly current: {
@@ -94,6 +97,14 @@ type PendingRendererDecoration = {
   timeout?: ReturnType<typeof setTimeout>
 }
 
+type SessionHydrationResult = {
+  settled: boolean
+  messages: number
+  parts: number
+  refs: number
+  pendingAttachments: number
+}
+
 type TuiPluginMeta = {
   id: string
 }
@@ -106,6 +117,8 @@ const MAX_DISPLAY_CHARS = 20_000
 const DEBUG_ENV = "OH_MY_OPENCODE_MAID_TUI_DEBUG"
 const RENDERER_RETRY_MS = 50
 const RENDERER_RETRY_LIMIT = 30
+const SESSION_HYDRATION_RETRY_LIMIT = 120
+const SESSION_ROUTE_POLL_MS = 250
 const RENDERER_TREE_LIMIT = 80
 const INLINE_DRAFT_COLLAPSED = "+ Original Draft Content"
 const INLINE_DRAFT_EXPANDED = "- Original Draft Content"
@@ -226,13 +239,14 @@ function findRenderableByID(root: unknown, id: string) {
 }
 
 function findTextTarget(root: unknown, ref: FallbackRef) {
+  const msgContainer = findRenderableByID(root, ref.messageID) ?? findRenderableByID(root, `message-${ref.messageID}`)
+  const scope = msgContainer ?? root
   for (const id of [`text-${ref.partID}`, ref.partID, `part-${ref.partID}`]) {
-    const found = findRenderableByID(root, id)
+    const found = findRenderableByID(scope, id)
     if (found) return found
   }
-  const candidates = walkRenderables(root, 500)
+  const candidates = walkRenderables(scope, 500)
   return candidates.find((item) => item.id.startsWith("text-") && item.id.includes(ref.partID))
-    ?? candidates.find((item) => item.id === ref.messageID || item.id === `message-${ref.messageID}`)
 }
 
 function rendererDecorationID(ref: ResponseKey) {
@@ -332,7 +346,7 @@ function successfulRewriteRefFromEvent(api: TuiApi, event: unknown): FallbackRef
 }
 
 function decorationKey(ref: ResponseKey) {
-  return `${ref.messageID}\0${ref.partID}`
+  return `${ref.sessionID}\0${ref.messageID}\0${ref.partID}`
 }
 
 function currentSessionID(api: TuiApi) {
@@ -474,6 +488,9 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   const config = await loadConfig(api.state.path.directory).catch(() => undefined)
   const activeDecorations = new Map<string, ActiveDecoration>()
   const pendingRendererDecorations = new Map<string, PendingRendererDecoration>()
+  let pendingSessionHydration: PendingRendererDecoration | undefined
+  let sessionRouteInterval: ReturnType<typeof setInterval> | undefined
+  let lastSessionID = currentSessionID(api)
 
   const disposeActiveDecoration = (key: string) => {
     try {
@@ -658,8 +675,22 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
       const inserted = index >= 0 && typeof parent.insertBefore === "function"
         ? parent.insertBefore(row, target)
         : parent.add(row, index >= 0 ? index : undefined)
-      if (row.parent !== parent && !hostChildren(parent).includes(row)) {
-        debugTui("renderer.attach.unverified", { messageID: ref.messageID, partID: ref.partID, targetID: target.id, rowID: row.id, parentID: parent.id, inserted })
+
+      const newSiblings = hostChildren(parent)
+      const rowIndex = newSiblings.indexOf(row)
+      const targetIndex = newSiblings.indexOf(target)
+      const isValidAttachment = row.parent === parent || newSiblings.includes(row)
+      const isBeforeTarget = rowIndex >= 0 && targetIndex >= 0 && rowIndex < targetIndex
+
+      if (!isValidAttachment || !isBeforeTarget) {
+        debugTui("renderer.attach.unverified", { messageID: ref.messageID, partID: ref.partID, targetID: target.id, rowID: row.id, parentID: parent.id, inserted, rowIndex, targetIndex })
+        if (isValidAttachment) {
+          try {
+            parent.remove?.(row.id)
+          } catch (error) {
+            debugTui("renderer.dispose.failed", { messageID: ref.messageID, partID: ref.partID, error: error instanceof Error ? error.message : String(error) })
+          }
+        }
         destroyRendererRow(ref, row)
         return false
       }
@@ -744,25 +775,113 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
     api.event.on("session.next.step.ended", (event) => debugTui("event.session.next.step.ended", { ...eventDebug(event), route: currentRouteDebug(api) })),
   ]
 
+  const hydrateSession = (): SessionHydrationResult => {
+    const empty = { settled: true, messages: 0, parts: 0, refs: 0, pendingAttachments: 0 }
+    if (!config?.show_original_draft) return empty
+    if (!store) return empty
+    const sessionID = currentSessionID(api)
+    if (!sessionID) return empty
+    const messages = api.state.session.messages(sessionID)
+    let parts = 0
+    let missingParts = 0
+    let refs = 0
+    let pendingAttachments = 0
+    for (const msg of messages) {
+      const messageID = stringField(msg, "id") ?? stringField(msg, "messageID")
+      if (!messageID) continue
+      const messageParts = api.state.part(messageID)
+      parts += messageParts.length
+      if (messageParts.length === 0) missingParts += 1
+      for (const part of messageParts) {
+        const ref = successfulRewriteRefFromPart(api.state.path.directory, part)
+        if (ref && hasOriginal(store, ref)) {
+          refs += 1
+          if (!attachRendererDecoration(ref)) {
+            scheduleRendererRetry(ref)
+            pendingAttachments += 1
+          }
+        }
+      }
+    }
+    return {
+      settled: messages.length > 0 && refs > 0 && missingParts === 0 && pendingAttachments === 0,
+      messages: messages.length,
+      parts,
+      refs,
+      pendingAttachments,
+    }
+  }
+
+  const clearSessionHydrationRetry = () => {
+    if (pendingSessionHydration?.timeout) clearTimeout(pendingSessionHydration.timeout)
+    pendingSessionHydration = undefined
+  }
+
+  const scheduleSessionHydrationRetry = () => {
+    if (pendingSessionHydration) return
+    const pending: PendingRendererDecoration = { attempts: 0 }
+    const retry = () => {
+      pending.attempts += 1
+      const result = hydrateSession()
+      if (result.settled) {
+        pendingSessionHydration = undefined
+        debugTui("session.hydration.settled", { ...result, attempts: pending.attempts })
+        return
+      }
+      if (pending.attempts >= SESSION_HYDRATION_RETRY_LIMIT) {
+        pendingSessionHydration = undefined
+        debugTui("session.hydration.retry.exhausted", { ...result, attempts: pending.attempts })
+        return
+      }
+      pending.timeout = setTimeout(retry, RENDERER_RETRY_MS)
+    }
+    pendingSessionHydration = pending
+    pending.timeout = setTimeout(retry, RENDERER_RETRY_MS)
+    debugTui("session.hydration.retry.scheduled", { attempts: SESSION_HYDRATION_RETRY_LIMIT, route: currentRouteDebug(api) })
+  }
+
+  const hydrateCurrentSession = (reason: string) => {
+    const result = hydrateSession()
+    debugTui("session.hydration.checked", { reason, ...result, route: currentRouteDebug(api) })
+    if (!result.settled) scheduleSessionHydrationRetry()
+  }
+
+  const clearRendererRetries = () => {
+    for (const key of [...pendingRendererDecorations.keys()]) clearRendererRetry(key)
+  }
+
+  const disposeActiveDecorations = () => {
+    for (const key of [...activeDecorations.keys()]) disposeActiveDecoration(key)
+  }
+
+  const handleSessionRouteChange = () => {
+    const sessionID = currentSessionID(api)
+    if (sessionID === lastSessionID) return
+    const previousSessionID = lastSessionID
+    lastSessionID = sessionID
+    clearSessionHydrationRetry()
+    clearRendererRetries()
+    disposeActiveDecorations()
+    debugTui("session.route.changed", { previousSessionID, route: currentRouteDebug(api) })
+    if (sessionID) hydrateCurrentSession("route-change")
+  }
+
   debugTui("tui.init", {
     directory: api.state.path.directory,
     route: currentRouteDebug(api),
     hasRenderer: Boolean(rendererRoot()),
   })
 
+  hydrateCurrentSession("init")
+  if (config?.show_original_draft) sessionRouteInterval = setInterval(handleSessionRouteChange, SESSION_ROUTE_POLL_MS)
+
   api.lifecycle?.onDispose(() => {
     unsubscribeEvent()
     for (const unsubscribe of debugUnsubscribers) unsubscribe()
-    for (const key of pendingRendererDecorations.keys()) clearRendererRetry(key)
-    for (const decoration of activeDecorations.values()) {
-      try {
-        decoration.dispose?.()
-      } catch (error) {
-        debugTui("decoration.dispose.failed", { error: error instanceof Error ? error.message : String(error) })
-        continue
-      }
-    }
-    activeDecorations.clear()
+    if (sessionRouteInterval) clearInterval(sessionRouteInterval)
+    clearSessionHydrationRetry()
+    clearRendererRetries()
+    disposeActiveDecorations()
     store?.close()
   })
 }

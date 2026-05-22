@@ -143,9 +143,8 @@ For normal sessions the system prompt encourages the main agent to append a fenc
 With `dist/tui.js` active:
 
 - Rewrite failures resolve the stripped original from the sidecar store and show it in a **local** TUI dialog only.
-- Registers `/maid-original` to reopen the latest sidecar original for the current session.
 - Successful rewrite originals stay in the sidecar as display-only data. When the host renderer tree is available, the TUI injects a host-realm OpenTUI row before the visible reply that starts as a local collapsed `+ Original Draft Content` block.
-- Clicking that renderer row fetches the original from the sidecar and expands it inline; clicking again collapses it and clears the raw text from the render-local row state. If renderer injection is unavailable or fails, no substitute decoration or overlay is shown; `/maid-original` remains the local recovery command.
+- Clicking that renderer row fetches the original from the sidecar and expands it inline; clicking again collapses it and clears the raw text from the render-local row state. If renderer injection is unavailable or fails, no substitute decoration or overlay is shown.
 - The TUI decoration is render-local: it does not mutate messages, synthesize reasoning parts, or expose those originals to exported conversation context.
 
 ## 🧠 Persistence & compaction
@@ -168,7 +167,7 @@ bun run typecheck
 bun run build
 ```
 
-Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled`, showing the matching status toast, and not calling the model for a command-result assistant turn. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, successful rewrites should show a local collapsed `+ Original Draft Content` renderer row when the host tree is available; it should expand inline on click, collapse on the next click, and never put raw original text into message history, logs, export, compaction, host decoration hints, or overlays. Fallback rows should open a local dialog, and `/maid-original` should reopen the sidecar original without changing session history.
+Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled`, showing the matching status toast, and not calling the model for a command-result assistant turn. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, successful rewrites should show a local collapsed `+ Original Draft Content` renderer row when the host tree is available; it should expand inline on click, collapse on the next click, and never put raw original text into message history, logs, export, compaction, host decoration hints, or overlays. Fallback rows should open a local dialog without changing session history.
 
 ## 📜 License
 

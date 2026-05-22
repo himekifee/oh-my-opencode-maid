@@ -9,22 +9,6 @@ type TuiDialog = {
   setSize(size: "medium" | "large" | "xlarge"): void
 }
 
-type TuiCommand = {
-  title: string
-  value: string
-  description?: string
-  category?: string
-  keybind?: string
-  suggested?: boolean
-  hidden?: boolean
-  enabled?: boolean
-  slash?: {
-    name: string
-    aliases?: string[]
-  }
-  onSelect?: () => void | Promise<void>
-}
-
 type TuiApi = {
   event: {
     on(type: string, handler: (event: unknown) => void): () => void
@@ -32,9 +16,6 @@ type TuiApi = {
   state: {
     path: {
       directory: string
-    }
-    session: {
-      messages(sessionID: string): ReadonlyArray<unknown>
     }
     part(messageID: string): ReadonlyArray<unknown>
   }
@@ -47,9 +28,6 @@ type TuiApi = {
   ui: {
     DialogAlert(props: { title: string; message: string; onConfirm?: () => void }): unknown
     dialog: TuiDialog
-  }
-  command?: {
-    register(cb: () => TuiCommand[]): () => void
   }
   renderer?: HostRenderer
   lifecycle?: {
@@ -387,27 +365,6 @@ function hasOriginal(store: ResponseStore | undefined, ref: FallbackRef) {
   }
 }
 
-function findLastOriginalRef(api: TuiApi, store: ResponseStore | undefined): FallbackRef | undefined {
-  const current = api.route.current
-  const sessionID = current.name === "session" ? stringField(current.params, "sessionID") : undefined
-  if (!sessionID) return undefined
-  const messages = api.state.session.messages(sessionID)
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (!record(message) || message.role !== "assistant") continue
-    const messageID = stringField(message, "id") ?? stringField(message, "messageID")
-    if (!messageID) continue
-    const parts = api.state.part(messageID)
-    for (let partIndex = parts.length - 1; partIndex >= 0; partIndex -= 1) {
-      const fallback = fallbackRefFromPart(api.state.path.directory, parts[partIndex])
-      if (fallback && hasOriginal(store, fallback)) return fallback
-      const successful = successfulRewriteRefFromPart(api.state.path.directory, parts[partIndex])
-      if (successful && hasOriginal(store, successful)) return successful
-    }
-  }
-  return undefined
-}
-
 function displayText(original: string) {
   if (original.length <= MAX_DISPLAY_CHARS) return original
   return `${original.slice(0, MAX_DISPLAY_CHARS)}\n\n[truncated for local TUI display]`
@@ -540,7 +497,6 @@ async function openOriginal(api: TuiApi, store: ResponseStore | undefined, ref: 
 
 async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   const store = await createResponseStore().catch(() => undefined)
-  let lastOriginalRef: FallbackRef | undefined
   const activeDecorations = new Map<string, ActiveDecoration>()
   const pendingRendererDecorations = new Map<string, PendingRendererDecoration>()
 
@@ -777,7 +733,6 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
     const fallbackRef = fallbackRefFromEvent(api.state.path.directory, event)
     if (fallbackRef) {
       if (hasOriginal(store, fallbackRef) && isCurrentSessionRef(api, fallbackRef)) {
-        lastOriginalRef = fallbackRef
         void openOriginal(api, store, fallbackRef)
       }
       return
@@ -790,7 +745,6 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
       if (active?.visibleText === rewriteRef.visibleText) return
       if (hasOriginal(store, rewriteRef)) {
         debugTui("original.found", refDebug(rewriteRef))
-        if (isCurrentSessionRef(api, rewriteRef)) lastOriginalRef = rewriteRef
         if (!attachRendererDecoration(rewriteRef)) {
           scheduleRendererRetry(rewriteRef)
           debugTui("renderer.decoration.unavailable", { messageID: rewriteRef.messageID, partID: rewriteRef.partID })
@@ -809,25 +763,12 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   debugTui("tui.init", {
     directory: api.state.path.directory,
     route: currentRouteDebug(api),
-    hasCommand: Boolean(api.command),
     hasRenderer: Boolean(rendererRoot()),
   })
-
-  const unregisterCommand = api.command?.register(() => [{
-    title: "Show original rewrite",
-    value: "maid.original",
-    description: "Open the sidecar-stored original for the latest rewrite.",
-    category: "oh-my-opencode-maid",
-    slash: {
-      name: "maid-original",
-    },
-    onSelect: () => openOriginal(api, store, lastOriginalRef && isCurrentSessionRef(api, lastOriginalRef) ? lastOriginalRef : findLastOriginalRef(api, store)),
-  }])
 
   api.lifecycle?.onDispose(() => {
     unsubscribeEvent()
     for (const unsubscribe of debugUnsubscribers) unsubscribe()
-    unregisterCommand?.()
     for (const key of pendingRendererDecorations.keys()) clearRendererRetry(key)
     for (const decoration of activeDecorations.values()) {
       try {

@@ -8,18 +8,6 @@ import tuiModule from "./tui"
 
 type EventHandler = (event: unknown) => void
 
-type Command = {
-  title: string
-  value: string
-  description?: string
-  category?: string
-  slash?: {
-    name: string
-    aliases?: string[]
-  }
-  onSelect?: () => void | Promise<void>
-}
-
 type TextPartDecoration = {
   type: "collapsed-thought"
   label: string
@@ -39,9 +27,7 @@ type FakeRuntime = {
   dialogs: string[]
   sizes: string[]
   handlers: Record<string, EventHandler>
-  commands: Command[]
   dispose?: () => void | Promise<void>
-  messages: unknown[]
   parts: Record<string, unknown[]>
 }
 
@@ -218,8 +204,6 @@ function fakeApi(directory: string): FakeRuntime {
   const dialogs: string[] = []
   const sizes: string[] = []
   const handlers: Record<string, EventHandler> = {}
-  const commands: Command[] = []
-  const messages: unknown[] = []
   const parts: Record<string, unknown[]> = {}
   let dispose: (() => void | Promise<void>) | undefined
   const api = {
@@ -233,11 +217,6 @@ function fakeApi(directory: string): FakeRuntime {
     },
     state: {
       path: { directory },
-      session: {
-        messages() {
-          return messages
-        },
-      },
       part(messageID: string) {
         return parts[messageID] ?? []
       },
@@ -260,12 +239,6 @@ function fakeApi(directory: string): FakeRuntime {
         },
       },
     },
-    command: {
-      register(cb: () => Command[]) {
-        commands.splice(0, commands.length, ...cb())
-        return () => commands.splice(0, commands.length)
-      },
-    },
     lifecycle: {
       onDispose(fn: () => void | Promise<void>) {
         dispose = fn
@@ -280,11 +253,9 @@ function fakeApi(directory: string): FakeRuntime {
     dialogs,
     sizes,
     handlers,
-    commands,
     get dispose() {
       return dispose
     },
-    messages,
     parts,
   }
 }
@@ -672,8 +643,6 @@ describe("tui fallback display", () => {
         expect(parent.children.some((child) => child.id === "oh-my-opencode-maid-original-m-p")).toBe(false)
         expect(renderer.postProcessFns).toHaveLength(0)
 
-        await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
-        expect(runtime.dialogs).toEqual(["Original text"])
         await runtime.dispose?.()
         expect(renderer.postProcessFns).toHaveLength(0)
       } finally {
@@ -967,96 +936,13 @@ describe("tui fallback display", () => {
     })
   })
 
-  test("slash command reopens latest fallback from TUI state", async () => {
-    await isolated(async (dir) => {
-      const store = await createResponseStore()
-      store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK, "Command raw SECRET_TOKEN")
-      store.close()
-      const runtime = fakeApi(dir)
-      runtime.messages.push({ id: "m", role: "assistant" })
-      runtime.parts.m = [{ id: "p", sessionID: "user-session", messageID: "m", type: "text", text: DISPLAY_ONLY_FALLBACK, time: { start: 1, end: 2 } }]
-
-      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
-      await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
-
-      expect(runtime.commands.find((command) => command.slash?.name === "maid-original")?.slash?.name).toBe("maid-original")
-      expect(runtime.dialogs).toEqual(["Command raw SECRET_TOKEN"])
-      await runtime.dispose?.()
-    })
-  })
-
-  test("slash command reopens latest successful rewrite original from TUI state", async () => {
-    await isolated(async (dir) => {
-      const store = await createResponseStore()
-      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Successful original SECRET_TOKEN")
-      store.close()
-      const runtime = fakeApi(dir)
-      runtime.messages.push({ id: "m", role: "assistant" })
-      runtime.parts.m = [{ id: "p", sessionID: "user-session", messageID: "m", type: "text", text: "Rewritten text", time: { start: 1, end: 2 } }]
-
-      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
-      await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
-
-      expect(runtime.dialogs).toEqual(["Successful original SECRET_TOKEN"])
-      await runtime.dispose?.()
-    })
-  })
-
-  test("slash command does not reuse latest original from another session", async () => {
-    await isolated(async (dir) => {
-      const store = await createResponseStore()
-      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m1", partID: "p1" }, "User rewritten", "User original SECRET_TOKEN")
-      store.putDisplayOriginal({ directory: dir, sessionID: "other-session", messageID: "m2", partID: "p2" }, "Other rewritten", "Other original SECRET_TOKEN")
-      store.close()
-      const runtime = fakeApi(dir)
-      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
-
-      runtime.handlers["message.part.updated"]?.({
-        type: "message.part.updated",
-        properties: { part: { id: "p1", sessionID: "user-session", messageID: "m1", type: "text", text: "User rewritten", time: { start: 1, end: 2 } } },
-      })
-      runtime.api.route.current.params = { sessionID: "other-session" }
-      runtime.messages.push({ id: "m2", role: "assistant" })
-      runtime.parts.m2 = [{ id: "p2", sessionID: "other-session", messageID: "m2", type: "text", text: "Other rewritten", time: { start: 3, end: 4 } }]
-
-      await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
-
-      expect(runtime.dialogs).toEqual(["Other original SECRET_TOKEN"])
-      await runtime.dispose?.()
-    })
-  })
-
-  test("slash command skips completed text parts without sidecar originals", async () => {
-    await isolated(async (dir) => {
-      const store = await createResponseStore()
-      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "stored" }, "Rewritten text", "Stored original SECRET_TOKEN")
-      store.close()
-      const runtime = fakeApi(dir)
-      runtime.messages.push({ id: "m", role: "assistant" })
-      runtime.parts.m = [
-        { id: "stored", sessionID: "user-session", messageID: "m", type: "text", text: "Rewritten text", time: { start: 1, end: 2 } },
-        { id: "plain", sessionID: "user-session", messageID: "m", type: "text", text: "Plain text without sidecar", time: { start: 3, end: 4 } },
-      ]
-
-      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
-      runtime.handlers["message.part.updated"]?.({
-        type: "message.part.updated",
-        properties: { part: runtime.parts.m[1] },
-      })
-      await runtime.commands.find((command) => command.slash?.name === "maid-original")?.onSelect?.()
-
-      expect(runtime.dialogs).toEqual(["Stored original SECRET_TOKEN"])
-      await runtime.dispose?.()
-    })
-  })
-
-  test("does not register the server-owned rewrite toggle command", async () => {
+  test("does not expose TUI slash commands", async () => {
     await isolated(async (dir) => {
       const runtime = fakeApi(dir)
 
       await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
 
-      expect(runtime.commands.map((command) => command.slash?.name)).toEqual(["maid-original"])
+      expect("command" in runtime.api).toBe(false)
       await runtime.dispose?.()
     })
   })

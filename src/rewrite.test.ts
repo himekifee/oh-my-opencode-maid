@@ -63,15 +63,25 @@ describe("rewrite helpers", () => {
   })
 
   test("builds handoff and rewrite prompts with advisory schema and final-only constraints", () => {
+    const systemPrompt = maidAgentPrompt(cfg)
+    const userPrompt = maidUserPrompt({ cfg, text: "Draft SECRET_TOKEN", note: note() })
+
     expect(handoffSystemPrompt()).toContain(HANDOFF)
     expect(handoffSystemPrompt()).toContain("audience")
     expect(handoffSystemPrompt()).toContain("exact_reply_mode")
     expect(handoffSystemPrompt()).toContain("You may append")
-    expect(maidAgentPrompt(cfg)).toContain("Configured roleplay prompt:\nconfigured voice")
-    expect(maidAgentPrompt(cfg)).toContain("Return only the final rewritten assistant reply")
-    expect(maidAgentPrompt(cfg)).not.toContain("You are Maid")
-    expect(maidUserPrompt({ cfg, text: "Draft SECRET_TOKEN", note: note() })).toContain("Draft SECRET_TOKEN")
-    expect(maidUserPrompt({ cfg, text: "Draft SECRET_TOKEN", note: note() })).not.toContain("You are Maid")
+    expect(systemPrompt).toContain("Follow the configured roleplay prompt exactly.")
+    expect(systemPrompt).toContain("Do not add any persona, honorific, relationship, nickname, or address form unless it appears in the configured prompt or assistant draft.")
+    expect(systemPrompt).toContain("Configured roleplay prompt:\nconfigured voice")
+    expect(systemPrompt).toContain("Return only the final rewritten assistant reply")
+    expect(systemPrompt).not.toContain("You are Maid")
+    expect(userPrompt).toContain("Draft SECRET_TOKEN")
+    expect(userPrompt).toContain(`Private handoff note: ${JSON.stringify(note())}`)
+    expect(userPrompt).toContain("Return only the final rewritten assistant reply. Do not include the private handoff note or any wrapper text.")
+    expect(userPrompt).not.toContain("Follow the configured roleplay prompt exactly.")
+    expect(userPrompt).not.toContain("Do not add any persona, honorific, relationship, nickname, or address form unless it appears in the configured prompt or assistant draft.")
+    expect(userPrompt).not.toContain("Configured roleplay prompt:\nconfigured voice")
+    expect(userPrompt).not.toContain("You are Maid")
   })
 
   test("default rewrite prompt labels only the current target without context", () => {

@@ -150,9 +150,6 @@ function currentUserPrompt(input: MaidUserPromptInput) {
 export function maidUserPrompt(input: MaidUserPromptInput) {
   return [
     "Rewrite this assistant draft for final visibility in OpenCode.",
-    "Follow the configured roleplay prompt exactly.",
-    "Do not add any persona, honorific, relationship, nickname, or address form unless it appears in the configured prompt or assistant draft.",
-    `Configured roleplay prompt:\n${input.cfg.roleplay_prompt}`,
     input.note ? `Private handoff note: ${JSON.stringify(input.note)}` : "Private handoff note: none supplied.",
     ...previousContextPrompt(input.previousContext),
     ...currentUserPrompt(input),

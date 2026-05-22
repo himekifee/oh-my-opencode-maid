@@ -92,6 +92,15 @@ function auxiliarySystem(system: string[]) {
   return system.some((item) => item.includes("You are a title generator."))
 }
 
+function appendHandoffSystemPrompt(system: string[]) {
+  const prompt = handoffSystemPrompt()
+  if (system.length === 0) {
+    system.push(prompt)
+    return
+  }
+  system[0] = system[0] ? `${system[0]}\n\n${prompt}` : prompt
+}
+
 function stringField(input: unknown, field: string) {
   if (!record(input)) return undefined
   const value = input[field]
@@ -624,7 +633,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       if (rewriteScope.getStore() === true) return
       rememberMainModel(input.sessionID, input.model, stringField(input, "variant"))
       if (output.system.some((item) => item.includes(HANDOFF))) return
-      output.system.push(handoffSystemPrompt())
+      appendHandoffSystemPrompt(output.system)
     },
 
     "experimental.chat.messages.transform": async () => {

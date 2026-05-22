@@ -245,6 +245,18 @@ describe("plugin hooks", () => {
     })
   })
 
+  test("concatenates handoff metadata into an existing system prompt", async () => {
+    await isolated(async (dir) => {
+      const hooks = await MaidPlugin(ctx({}, dir))
+      const output = { system: ["base system"] }
+
+      await hooks["experimental.chat.system.transform"]?.({ sessionID: "user-session", model: model() }, output)
+
+      expect(output.system).toEqual([`base system\n\n${handoffSystemPrompt()}`])
+      expect(output.system[0]?.match(new RegExp(HANDOFF, "g"))?.length).toBe(1)
+    })
+  })
+
   test("registers the server-side rewrite toggle command even when disabled", async () => {
     await isolated(async (dir) => {
       await mkdir(path.dirname(userConfigFile()), { recursive: true })

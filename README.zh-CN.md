@@ -112,7 +112,8 @@ bun run build
   "model": "main-agent-model",
   // "variant": "optional-provider-variant-for-concrete-models",
   "rewrite_context_size": 1,
-  "roleplay_prompt": "Rewrite the assistant reply in English as Yuzuki, a cheerful and attentive maid assistant: gentle, courteous, precise, logically organized, quietly warm, and modest about limitations. Always call me master. Preserve facts, code, commands, paths, URLs, identifiers, numbers, markdown structure, and the user's requested meaning."
+  "roleplay_prompt": "Rewrite the assistant reply in English as Yuzuki, a cheerful and attentive maid assistant: gentle, courteous, precise, logically organized, quietly warm, and modest about limitations. Always call me master. Preserve facts, code, commands, paths, URLs, identifiers, numbers, markdown structure, and the user's requested meaning.",
+  "show_original_draft": false
 }
 ```
 
@@ -123,6 +124,7 @@ bun run build
 | `variant` | — | 只有填了具体模型时才会把它传给隐藏改写代理。用 `main-agent-model` 时，沿用从主会话捕获到的 variant。 |
 | `rewrite_context_size` | `1` | 每次隐藏改写提示里包含的改写轮数，取值 `1` 到 `20`。`1` 只发送本次改写目标；更大的值会加入当前用户提示，并把同一根会话里之前成功改写的内容作为仅供参考的上下文加入。 |
 | `roleplay_prompt` | *柚姬女仆人格* | 改写代理会一字不差地照着它来。魔法全在这一行。 |
+| `show_original_draft` | `false` | 开启后，在宿主渲染树可用时，改写成功的内容前面会注入一个本地可折叠的 `+ Original Draft Content` TUI 行。 |
 
 没有另外的 endpoint、密钥、超时、预设回复或者侵入式开关 —— 配置就这么点。
 
@@ -145,7 +147,7 @@ bun run build
 启用 `dist/tui.js` 之后：
 
 - 改写失败时，会从那个旁路库里把抽走的原文捞回来，**只**在本地 TUI 弹窗里给你看。
-- 改写成功的原文只保留在旁路库的仅供展示数据里。如果宿主渲染树可用，TUI 会在可见回复前面注入一个同 realm 的 OpenTUI 行，显示本地折叠的 `+ Original Draft Content` 块。
+- 改写成功的原文只保留在旁路库的仅供展示数据里。开启 `show_original_draft` 且宿主渲染树可用时，TUI 会在可见回复前面注入一个同 realm 的 OpenTUI 行，显示本地折叠的 `+ Original Draft Content` 块。
 - 点击这个 renderer 行时，才会从旁路库读取原文并在本地内联展开；再次点击会折叠，并清掉渲染本地状态里的原文。如果 renderer 注入不可用或失败，TUI 不会显示替代装饰或 overlay。
 - 这个 TUI 装饰只存在于本地渲染层：不改动消息、不伪造推理片段，也不会让这些原文进入导出内容或对话上下文。
 
@@ -169,7 +171,7 @@ bun run typecheck
 bun run build
 ```
 
-运行时自测建议在 tmux 里做，把 OpenCode 指到构建好的 `dist/index.js`：发一条普通提示，看看原始草稿会不会一闪而过，确认最终回复确实照着 `roleplay_prompt` 走；再运行 `/maid-rewrite-toggle`，确认改写会立刻关闭和重新打开，同时持久化 `enabled`、显示对应的状态提示，并且不会为了命令结果回复去调用模型。再特意触发一次改写失败，确认抽走的原文只在「仅供展示」记录成功落库之后才露面。还要验证落库失败的路径会乖乖输出中性兜底文字或 `FAILURE`，而不是把没被追踪的原文漏出来。启用 `dist/tui.js` 后，如果宿主渲染树可用，成功改写应该显示一个本地折叠的 `+ Original Draft Content` renderer 行；点击后在本地内联展开，再点一次折叠，而且原文绝不能进入消息历史、日志、导出、压缩、宿主装饰提示或 overlay。兜底记录应该打开本地弹窗，而且不改动会话历史。
+运行时自测建议在 tmux 里做，把 OpenCode 指到构建好的 `dist/index.js`：发一条普通提示，看看原始草稿会不会一闪而过，确认最终回复确实照着 `roleplay_prompt` 走；再运行 `/maid-rewrite-toggle`，确认改写会立刻关闭和重新打开，同时持久化 `enabled`、显示对应的状态提示，并且不会为了命令结果回复去调用模型。再特意触发一次改写失败，确认抽走的原文只在「仅供展示」记录成功落库之后才露面。还要验证落库失败的路径会乖乖输出中性兜底文字或 `FAILURE`，而不是把没被追踪的原文漏出来。启用 `dist/tui.js` 后，确认成功改写默认不显示可折叠原文行。当开启 `show_original_draft` 且宿主渲染树可用时，成功改写应该显示一个本地折叠的 `+ Original Draft Content` renderer 行；点击后在本地内联展开，再点一次折叠，而且原文绝不能进入消息历史、日志、导出、压缩、宿主装饰提示或 overlay。兜底记录应该打开本地弹窗，而且不改动会话历史。
 
 ## 📜 许可
 

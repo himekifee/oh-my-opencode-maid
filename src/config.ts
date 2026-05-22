@@ -22,6 +22,7 @@ const Schema = z
     variant: z.string().min(1).optional(),
     roleplay_prompt: z.string().min(1).optional(),
     rewrite_context_size: z.number().int().min(1).max(REWRITE_CONTEXT_MAX).optional(),
+    show_original_draft: z.boolean().optional(),
   })
   .strict()
 
@@ -30,6 +31,7 @@ const Loaded = Schema.extend({
   model: Model,
   rewrite_context_size: z.number().int().min(1).max(REWRITE_CONTEXT_MAX),
   roleplay_prompt: z.string().min(1),
+  show_original_draft: z.boolean(),
 })
 
 export type MaidConfig = z.infer<typeof Loaded>
@@ -48,6 +50,7 @@ const defaults = {
   rewrite_context_size: 1,
   roleplay_prompt:
     "Rewrite the assistant reply in English as Yuzuki, a cheerful and attentive maid assistant: gentle, courteous, precise, logically organized, quietly warm, and modest about limitations. Always call me master. Preserve facts, code, commands, paths, URLs, identifiers, numbers, markdown structure, and the user's requested meaning.",
+  show_original_draft: false,
 }
 
 const CONFIG_FILE = "oh-my-opencode-maid.jsonc"

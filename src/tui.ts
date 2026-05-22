@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync } from "node:fs"
 import path from "node:path"
+import { loadConfig } from "./config"
 import { DISPLAY_ONLY_FALLBACK } from "./fallback"
 import { createResponseStore, type ResponseKey, type ResponseStore } from "./responses"
 
@@ -497,6 +498,7 @@ async function openOriginal(api: TuiApi, store: ResponseStore | undefined, ref: 
 
 async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   const store = await createResponseStore().catch(() => undefined)
+  const config = await loadConfig(api.state.path.directory).catch(() => undefined)
   const activeDecorations = new Map<string, ActiveDecoration>()
   const pendingRendererDecorations = new Map<string, PendingRendererDecoration>()
 
@@ -739,7 +741,7 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
     }
 
     const rewriteRef = successfulRewriteRefFromEvent(api, event)
-    if (rewriteRef && store) {
+    if (rewriteRef && store && config?.show_original_draft) {
       const key = decorationKey(rewriteRef)
       const active = activeDecorations.get(key)
       if (active?.visibleText === rewriteRef.visibleText) return

@@ -48,6 +48,7 @@ describe("config", () => {
         model: DEFAULT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
       expect(cfg.roleplay_prompt).toContain("maid assistant")
       expect(cfg.roleplay_prompt).toContain("courteous")
@@ -61,6 +62,7 @@ describe("config", () => {
         model: DEFAULT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: cfg.roleplay_prompt,
+        show_original_draft: false,
       })
     })
   })
@@ -79,6 +81,7 @@ describe("config", () => {
         model: DEFAULT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: "custom maid",
+        show_original_draft: false,
       })
       expect(await Bun.file(file).text()).toBe(original)
     })
@@ -97,6 +100,7 @@ describe("config", () => {
         model: DEFAULT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
       const created = JSON.parse(await Bun.file(userConfigFile()).text())
       expect(created).toEqual({
@@ -104,6 +108,7 @@ describe("config", () => {
         model: DEFAULT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
@@ -129,6 +134,7 @@ describe("config", () => {
         variant: "thinking",
         rewrite_context_size: 1,
         roleplay_prompt: "user maid",
+        show_original_draft: false,
       })
     })
   })
@@ -144,13 +150,14 @@ describe("config", () => {
         model: DEFAULT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
 
-  test("accepts only enabled, model, variant, roleplay_prompt, and rewrite_context_size", async () => {
+  test("accepts only enabled, model, variant, roleplay_prompt, rewrite_context_size, and show_original_draft", async () => {
     await isolated(async (dir) => {
-      await writeJson(userConfigFile(), { enabled: false, model: "anthropic/claude-sonnet-4-5", variant: "thinking", roleplay_prompt: "formal maid", rewrite_context_size: REWRITE_CONTEXT_MAX })
+      await writeJson(userConfigFile(), { enabled: false, model: "anthropic/claude-sonnet-4-5", variant: "thinking", roleplay_prompt: "formal maid", rewrite_context_size: REWRITE_CONTEXT_MAX, show_original_draft: true })
 
       await expect(loadConfig(dir)).resolves.toEqual({
         enabled: false,
@@ -158,6 +165,7 @@ describe("config", () => {
         variant: "thinking",
         rewrite_context_size: REWRITE_CONTEXT_MAX,
         roleplay_prompt: "formal maid",
+        show_original_draft: true,
       })
     })
   })
@@ -174,6 +182,7 @@ describe("config", () => {
         model: MAIN_AGENT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
@@ -189,6 +198,7 @@ describe("config", () => {
         model: MAIN_AGENT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
@@ -211,6 +221,7 @@ describe("config", () => {
         model: MAIN_AGENT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
@@ -274,6 +285,7 @@ describe("config", () => {
         model: "openai/gpt-5.5",
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
@@ -296,6 +308,7 @@ describe("config", () => {
         model: MAIN_AGENT_MODEL,
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
@@ -321,6 +334,7 @@ describe("config", () => {
         model: "openai/gpt-5.5",
         rewrite_context_size: 1,
         roleplay_prompt: expect.stringContaining("Yuzuki"),
+        show_original_draft: false,
       })
     })
   })
@@ -438,6 +452,16 @@ describe("config", () => {
     for (const value of [0, 1.5, REWRITE_CONTEXT_MAX + 1, "2"]) {
       await isolated(async (dir) => {
         await writeJson(userConfigFile(), { rewrite_context_size: value })
+
+        await expect(loadConfig(dir)).rejects.toThrow()
+      })
+    }
+  })
+
+  test("rejects invalid show_original_draft values", async () => {
+    for (const value of [0, "true", null, {}]) {
+      await isolated(async (dir) => {
+        await writeJson(userConfigFile(), { show_original_draft: value })
 
         await expect(loadConfig(dir)).rejects.toThrow()
       })

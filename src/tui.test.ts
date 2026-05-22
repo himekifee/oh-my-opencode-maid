@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { DISPLAY_ONLY_FALLBACK } from "./fallback"
 import { createResponseStore } from "./responses"
 import tuiModule from "./tui"
+
+async function writeConfig(options: Record<string, unknown> = {}) {
+  const configHome = process.env.XDG_CONFIG_HOME ?? path.join(process.env.HOME ?? "", ".config")
+  const file = path.join(configHome, "opencode", "oh-my-opencode-maid.jsonc")
+  await mkdir(path.dirname(file), { recursive: true })
+  await Bun.write(file, JSON.stringify(options))
+}
 
 type EventHandler = (event: unknown) => void
 
@@ -184,16 +191,20 @@ function resetPluginGlobals() {
 
 async function isolated<T>(fn: (dir: string) => Promise<T>) {
   const dir = await mkdtemp(path.join(tmpdir(), "omo-maid-tui-"))
-  const xdg = process.env.XDG_STATE_HOME
+  const xdgState = process.env.XDG_STATE_HOME
+  const xdgConfig = process.env.XDG_CONFIG_HOME
   const home = process.env.HOME
   process.env.XDG_STATE_HOME = path.join(dir, "state")
+  process.env.XDG_CONFIG_HOME = path.join(dir, "config")
   process.env.HOME = path.join(dir, "home")
   try {
     return await fn(dir)
   } finally {
     resetPluginGlobals()
-    if (xdg === undefined) delete process.env.XDG_STATE_HOME
-    else process.env.XDG_STATE_HOME = xdg
+    if (xdgState === undefined) delete process.env.XDG_STATE_HOME
+    else process.env.XDG_STATE_HOME = xdgState
+    if (xdgConfig === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = xdgConfig
     if (home === undefined) delete process.env.HOME
     else process.env.HOME = home
     await rm(dir, { recursive: true, force: true })
@@ -359,8 +370,59 @@ describe("tui fallback display", () => {
     })
   })
 
+  test("does not inject renderer rows for successful rewrite updates by default (show_original_draft is false)", async () => {
+    await isolated(async (dir) => {
+      const store = await createResponseStore()
+      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
+      store.close()
+      const runtime = fakeApi(dir)
+      const root = new FakeRenderable({}, { id: "root" })
+      const parent = new FakeRenderable({}, { id: "message-m" })
+      const target = new FakeTextRenderable({}, { id: "text-p" })
+      root.add(parent)
+      parent.add(target)
+      runtime.api.renderer = fakeRenderer(root)
+      runtime.parts.m = [rewritePart()]
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+      runtime.handlers["message.part.updated"]?.({
+        type: "message.part.updated",
+        properties: { part: { id: "p", sessionID: "user-session", messageID: "m", type: "text", time: { start: 1, end: 2 } } },
+      })
+
+      expect(parent.children.some((child) => child.id === "oh-my-opencode-maid-original-m-p")).toBe(false)
+      expect(runtime.dialogs).toEqual([])
+      await runtime.dispose?.()
+    })
+  })
+
+  test("does not inject renderer rows when config loading fails", async () => {
+    await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: "true" })
+      const store = await createResponseStore()
+      store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
+      store.close()
+      const runtime = fakeApi(dir)
+      const root = new FakeRenderable({}, { id: "root" })
+      const parent = new FakeRenderable({}, { id: "message-m" })
+      const target = new FakeTextRenderable({}, { id: "text-p" })
+      root.add(parent)
+      parent.add(target)
+      runtime.api.renderer = fakeRenderer(root)
+      runtime.parts.m = [rewritePart()]
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+      runtime.handlers["message.part.updated"]?.({ type: "message.part.updated", properties: { part: rewritePart() } })
+
+      expect(parent.children.some((child) => child.id === "oh-my-opencode-maid-original-m-p")).toBe(false)
+      expect(runtime.dialogs).toEqual([])
+      await runtime.dispose?.()
+    })
+  })
+
   test("injects renderer rows for identifier-only successful rewrite updates", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -387,6 +449,7 @@ describe("tui fallback display", () => {
 
   test("safely retries when renderer rows are unavailable", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -416,6 +479,7 @@ describe("tui fallback display", () => {
 
   test("injects a host-realm renderer row that toggles the sidecar original inline", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -530,6 +594,7 @@ describe("tui fallback display", () => {
 
   test("keeps the initially collapsed renderer row compact before layout reports width", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -559,6 +624,7 @@ describe("tui fallback display", () => {
 
   test("uses renderer-tree inline rows without calling the private decoration hook", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -587,6 +653,7 @@ describe("tui fallback display", () => {
 
   test("avoids scroll content constructors when the target is inside scroll content", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -610,6 +677,7 @@ describe("tui fallback display", () => {
 
   test("does not attach a post-process overlay after renderer row retries are exhausted", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const realSetTimeout = globalThis.setTimeout
       const realClearTimeout = globalThis.clearTimeout
       const pendingTimeouts: Array<() => void> = []
@@ -654,6 +722,7 @@ describe("tui fallback display", () => {
 
   test("does not attach an overlay if renderer insertion is unverified", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const realSetTimeout = globalThis.setTimeout
       const realClearTimeout = globalThis.clearTimeout
       const pendingTimeouts: Array<() => void> = []
@@ -696,6 +765,7 @@ describe("tui fallback display", () => {
 
   test("cleans up an already attached renderer row on dispose", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -720,6 +790,7 @@ describe("tui fallback display", () => {
 
   test("debug logging omits message text", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const debugPath = path.join(dir, "tui-debug.log")
       const previousDebug = process.env.OH_MY_OPENCODE_MAID_TUI_DEBUG
       process.env.OH_MY_OPENCODE_MAID_TUI_DEBUG = debugPath
@@ -809,6 +880,7 @@ describe("tui fallback display", () => {
 
   test("does not call host decorations for repeated completed updates", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()
@@ -843,6 +915,7 @@ describe("tui fallback display", () => {
 
   test("ignores host decoration hooks even if they would fail", async () => {
     await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
       const store = await createResponseStore()
       store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text")
       store.close()

@@ -201,7 +201,7 @@ export async function createResponseStore(): Promise<ResponseStore> {
     SELECT message_id, part_id, visible_text, text FROM responses
     WHERE directory = $directory
       AND session_id = $session_id
-      AND display_only = 0
+      AND visible_text != $fallback_visible_text
     ORDER BY updated_at DESC, created_at DESC, message_id DESC, part_id DESC
     LIMIT $limit
   `)
@@ -270,7 +270,12 @@ export async function createResponseStore(): Promise<ResponseStore> {
       return consumePending(key, visibleText)
     },
     getSessionOriginals(directory, sessionID, limit) {
-      const rows = selectSession.all({ $directory: directory, $session_id: sessionID, $limit: limit }).reverse()
+      const rows = selectSession.all({
+        $directory: directory,
+        $session_id: sessionID,
+        $fallback_visible_text: DISPLAY_ONLY_FALLBACK,
+        $limit: limit,
+      }).reverse()
       return rows.flatMap((row) => {
         if (!record(row)) return []
         if (typeof row.message_id !== "string") return []

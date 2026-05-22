@@ -277,9 +277,15 @@ const MaidPlugin: Plugin = async (ctx) => {
     const remembered = history?.slice(-limit)
     const entries: RewriteContextEntry[] = []
     const pushEntry = (entry: RewriteContextEntry) => {
-      const index = entries.findIndex((item) => item.originalText === entry.originalText && item.visibleText === entry.visibleText)
+      const index = entries.findIndex((item) => item.visibleText === entry.visibleText)
       if (index >= 0) entries.splice(index, 1)
       entries.push(entry)
+    }
+    try {
+      const originals = responses?.getSessionOriginals(ctx.directory, id, limit) ?? []
+      for (const item of originals) pushEntry({ originalText: item.originalText, visibleText: item.visibleText })
+    } catch {
+      // Persisted context is best-effort; in-memory history is still usable.
     }
     for (const entry of remembered ?? []) pushEntry(entry)
     const out = entries.slice(-limit)

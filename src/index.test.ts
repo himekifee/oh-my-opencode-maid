@@ -2212,7 +2212,7 @@ describe("plugin hooks", () => {
     })
   })
 
-  test("does not hydrate rewrite context from persisted originals after plugin restart", async () => {
+  test("hydrates rewrite context from persisted originals after plugin restart", async () => {
     await isolated(async (dir) => {
       await mkdir(path.dirname(userConfigFile()), { recursive: true })
       await writeFile(userConfigFile(), JSON.stringify({ rewrite_context_size: 3 }))
@@ -2242,15 +2242,15 @@ describe("plugin hooks", () => {
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m3", partID: "p3" }, nextOutput)
 
       expect(output.text).toBe("Current maid SECRET_TOKEN")
-      expect(prompts[0]).not.toContain("Previous context, reference only")
+      expect(prompts[0]).toContain("Previous context, reference only")
       expect(prompts[0]).not.toContain("Persisted raw SECRET_TOKEN")
-      expect(prompts[0]).not.toContain("Persisted maid SECRET_TOKEN")
+      expect(prompts[0]).toContain("Persisted maid SECRET_TOKEN")
       expect(prompts[0]).toContain("Current request")
       expect(nextOutput.text).toBe("Next maid SECRET_TOKEN")
       expect(prompts[1]).toContain("Previous context, reference only")
       expect(prompts[1]).not.toContain("Persisted raw SECRET_TOKEN")
       expect(prompts[1]).not.toContain("Current raw SECRET_TOKEN")
-      expect(prompts[1]).not.toContain("Persisted maid SECRET_TOKEN")
+      expect(prompts[1]).toContain("Persisted maid SECRET_TOKEN")
       expect(prompts[1]).toContain("Current maid SECRET_TOKEN")
       expect(prompts[1]).not.toContain("Current request")
       expect(prompts[1]).toContain("Next request")

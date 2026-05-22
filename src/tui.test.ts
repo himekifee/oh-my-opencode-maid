@@ -57,6 +57,8 @@ class FakeRenderable {
   children: FakeRenderable[] = []
   renderRequests = 0
   onMouseDown?: (event?: unknown) => void
+  onMouseDrag?: (event?: unknown) => void
+  onMouseUp?: (event?: unknown) => void
   options: Record<string, unknown>
   destroyed = false
 
@@ -70,6 +72,8 @@ class FakeRenderable {
     this.height = typeof options.height === "number" ? options.height : 1
     this.selectable = typeof options.selectable === "boolean" ? options.selectable : false
     this.onMouseDown = typeof options.onMouseDown === "function" ? options.onMouseDown as (event?: unknown) => void : undefined
+    this.onMouseDrag = typeof options.onMouseDrag === "function" ? options.onMouseDrag as (event?: unknown) => void : undefined
+    this.onMouseUp = typeof options.onMouseUp === "function" ? options.onMouseUp as (event?: unknown) => void : undefined
   }
 
   get content() {
@@ -507,6 +511,7 @@ describe("tui fallback display", () => {
       expect(collapsedBuffer.calls.some((call) => call.method === "drawText" && typeof call.args[0] === "string" && call.args[0].includes("+ Original Draft Content"))).toBe(true)
 
       row?.onMouseDown?.({ y: 1, preventDefault() {}, stopPropagation() {} })
+      row?.onMouseUp?.({ y: 1, preventDefault() {}, stopPropagation() {} })
       const expandedBuffer = renderRow(row!)
       const body = row?.children.find((child) => child.id === "oh-my-opencode-maid-original-m-p-body")
       expect(body).toBeInstanceOf(FakeTextRenderable)
@@ -527,58 +532,37 @@ describe("tui fallback display", () => {
       expect(runtime.dialogs).toEqual([])
       if (row) row.screenY = 7
 
-      let bodyPrevented = 0
-      let bodyStopped = 0
+      let dragPrevented = 0
+      let dragStopped = 0
       row?.onMouseDown?.({
         y: 2,
-        preventDefault() {
-          bodyPrevented += 1
-        },
-        stopPropagation() {
-          bodyStopped += 1
-        },
-      })
-      expect(row?.options.content).toBe("- Original Draft Content")
-      expect(renderRow(row!).calls.some((call) => call.args.includes("Original text"))).toBe(false)
-      expect(row?.children.filter((child) => child.id === "oh-my-opencode-maid-original-m-p-body")).toHaveLength(1)
-      expect(body?.getSelectedText()).toBe("Original text")
-      expect(bodyPrevented).toBe(0)
-      expect(bodyStopped).toBe(0)
-
-      let targetBodyPrevented = 0
-      let targetBodyStopped = 0
-      row?.onMouseDown?.({
-        y: 0,
         target: body,
         preventDefault() {
-          targetBodyPrevented += 1
+          dragPrevented += 1
         },
         stopPropagation() {
-          targetBodyStopped += 1
+          dragStopped += 1
         },
       })
-      expect(row?.options.content).toBe("- Original Draft Content")
-      expect(row?.children.filter((child) => child.id === "oh-my-opencode-maid-original-m-p-body")).toHaveLength(1)
-      expect(targetBodyPrevented).toBe(0)
-      expect(targetBodyStopped).toBe(0)
-
-      let screenBodyPrevented = 0
-      let screenBodyStopped = 0
-      row?.onMouseDown?.({
-        y: 9,
+      row?.onMouseDrag?.({ y: 2 })
+      row?.onMouseUp?.({
+        y: 4,
+        target: body,
         preventDefault() {
-          screenBodyPrevented += 1
+          dragPrevented += 1
         },
         stopPropagation() {
-          screenBodyStopped += 1
+          dragStopped += 1
         },
       })
       expect(row?.options.content).toBe("- Original Draft Content")
       expect(row?.children.filter((child) => child.id === "oh-my-opencode-maid-original-m-p-body")).toHaveLength(1)
-      expect(screenBodyPrevented).toBe(0)
-      expect(screenBodyStopped).toBe(0)
+      expect(body?.getSelectedText()).toBe("Original text")
+      expect(dragPrevented).toBe(0)
+      expect(dragStopped).toBe(0)
 
-      row?.onMouseDown?.({ y: 1, preventDefault() {}, stopPropagation() {} })
+      row?.onMouseDown?.({ y: 2, target: body, preventDefault() {}, stopPropagation() {} })
+      row?.onMouseUp?.({ y: 2, target: body, preventDefault() {}, stopPropagation() {} })
       const recollapsedBuffer = renderRow(row!)
       expect(recollapsedBuffer.calls.some((call) => call.args.includes("Original text"))).toBe(false)
       expect(recollapsedBuffer.calls.some((call) => call.method === "drawText" && typeof call.args[0] === "string" && call.args[0].includes("+ Original Draft Content"))).toBe(true)

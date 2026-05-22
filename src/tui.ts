@@ -384,33 +384,6 @@ function consumeMouseEvent(event: unknown) {
   callEventMethod(event, "stopPropagation")
 }
 
-function mouseY(event: unknown) {
-  return record(event) ? finiteNumber(event.y) : undefined
-}
-
-function isMouseEventTarget(event: unknown, target: HostRenderable | undefined) {
-  if (!target || !record(event)) return false
-  const eventTarget = event.target
-  return eventTarget === target || hostRenderable(eventTarget) && eventTarget.id === target.id
-}
-
-function isBodyRelativeY(relativeY: number, height: number | undefined) {
-  const y = Math.floor(relativeY)
-  if (height === undefined) return y > 1
-  return y > 1 && y < Math.floor(height - 1)
-}
-
-function isExpandedDraftBodyClick(row: HostRenderable, event: unknown, expandedText: string | undefined, body?: HostRenderable) {
-  if (expandedText === undefined) return false
-  if (isMouseEventTarget(event, body)) return true
-  const y = mouseY(event)
-  if (y === undefined) return false
-  const height = finiteNumber(row.height)
-  if (isBodyRelativeY(y, height)) return true
-  const rowY = finiteNumber(row.screenY) ?? finiteNumber(row.y)
-  return rowY === undefined ? false : isBodyRelativeY(y - Math.floor(rowY), height)
-}
-
 function inlineDraftText(expandedText: string | undefined) {
   return expandedText === undefined ? INLINE_DRAFT_COLLAPSED : INLINE_DRAFT_EXPANDED
 }
@@ -576,6 +549,7 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
     let row: HostRenderable | undefined
     let body: HostRenderable | undefined
     let expandedText: string | undefined
+    let dragged = false
     const destroyBody = () => {
       if (!body) return
       try {
@@ -664,8 +638,16 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
           if (!row) return
           drawInlineDraftRow(row, buffer, expandedText)
         },
-        onMouseDown: (event: unknown) => {
-          if (row && isExpandedDraftBodyClick(row, event, expandedText, body)) return
+        onMouseDown: () => {
+          dragged = false
+        },
+        onMouseDrag: () => {
+          dragged = true
+        },
+        onMouseUp: (event: unknown) => {
+          const wasDragged = dragged
+          dragged = false
+          if (wasDragged) return
           consumeMouseEvent(event)
           toggleExpanded()
         },

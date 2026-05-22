@@ -18,6 +18,7 @@ import {
   MAIN_MODEL,
   PROVIDER_ID,
   RAW_DRAFT,
+  RAW_TOKEN,
   REWRITE_MODEL,
   REWRITE_VARIANT,
   REWRITTEN_TEXT,
@@ -96,6 +97,11 @@ function assistantText(exportJson: string): string {
     }
   }
   return out.join("\n")
+}
+
+function sessionTitle(exportJson: string): string {
+  const data = JSON.parse(exportJson) as { info?: { title?: unknown } }
+  return typeof data.info?.title === "string" ? data.info.title : ""
 }
 
 async function main() {
@@ -241,11 +247,13 @@ async function main() {
     } catch {
       visible = ""
     }
+    const title = exported ? sessionTitle(exported) : ""
 
     if (process.env.E2E_DEBUG) {
       process.stdout.write(`\n----- opencode stderr -----\n${run.stderr}\n`)
       if (contextRun) process.stdout.write(`----- context continuation stderr -----\n${contextRun.stderr}\n`)
       if (compactRun) process.stdout.write(`----- compaction trigger stderr -----\n${compactRun.stderr}\n`)
+      process.stdout.write(`----- session ${sessionID ?? "(none)"} title -----\n${title}\n`)
       process.stdout.write(`----- session ${sessionID ?? "(none)"} visible assistant text -----\n${visible}\n`)
       process.stdout.write(`----- fake requests -----\n${JSON.stringify(fake.requests, null, 2)}\n`)
     }
@@ -349,6 +357,11 @@ async function main() {
       "raw draft never became the visible reply",
       visible.length > 0 && !visible.includes(RAW_DRAFT) && !visible.includes(SECOND_RAW_DRAFT),
       "RAW_DRAFT leaked into the visible reply (rewrite did not take over)",
+    )
+    check(
+      "session title does not expose raw draft text",
+      title.length > 0 && !title.includes(RAW_DRAFT) && !title.includes(SECOND_RAW_DRAFT) && !title.includes(RAW_TOKEN),
+      `session title=${JSON.stringify(title)}`,
     )
 
     const ok = checks.every((c) => c.ok)

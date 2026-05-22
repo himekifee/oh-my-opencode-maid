@@ -290,6 +290,147 @@ describe("public stream gate", () => {
     expect(upstreamHeaders.every((headers) => !headers.has(PROVIDER_REWRITE_HEADER))).toBe(true)
   })
 
+  test("sanitizes title-generator JSON without calling rewrite", async () => {
+    const rawTitle = "RAW_DRAFT::do-not-show-this-verbatim::TOKEN_KEEP_9173"
+    let rewriteCalls = 0
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: rawTitle } }] }), {
+        headers: { "content-type": "application/json" },
+      })
+    installProviderRewrite({
+      owner: "/tmp/project",
+      active: () => false,
+      server: "http://opencode.internal",
+      rewrite: async (draft) => {
+        rewriteCalls += 1
+        return `Maid ${draft}`
+      },
+    })
+
+    const out = await fetch(upstream, {
+      method: "POST",
+      body: JSON.stringify({ messages: [{ role: "system", content: "You are a title generator. You output ONLY a thread title." }] }),
+    }).then((res) => res.text())
+
+    expect(out).toContain("New session")
+    expect(out).not.toContain(rawTitle)
+    expect(out).not.toContain("TOKEN_KEEP_9173")
+    expect(rewriteCalls).toBe(0)
+  })
+
+  test("sanitizes title-generator SSE streams without calling rewrite", async () => {
+    const rawTitle = "RAW_DRAFT::do-not-show-this-verbatim::TOKEN_KEEP_9173"
+    let rewriteCalls = 0
+    globalThis.fetch = async () =>
+      new Response(`${chunk("RAW_DRAFT::do-not-show-this-verbatim::")}${chunk("TOKEN_KEEP_9173")}${chunk("", "stop")}data: [DONE]\n\n`, {
+        headers: { "content-type": "text/event-stream" },
+      })
+    installProviderRewrite({
+      owner: "/tmp/project",
+      active: () => false,
+      server: "http://opencode.internal",
+      rewrite: async (draft) => {
+        rewriteCalls += 1
+        return `Maid ${draft}`
+      },
+    })
+
+    const out = await fetch(upstream, {
+      method: "POST",
+      body: JSON.stringify({ messages: [{ role: "system", content: "You are a title generator. You output ONLY a thread title." }], stream: true }),
+    }).then((res) => res.text())
+
+    expect(out).toContain("New session")
+    expect(out).not.toContain(rawTitle)
+    expect(out).not.toContain("TOKEN_KEEP_9173")
+    expect(rewriteCalls).toBe(0)
+  })
+
+  test("does not sanitize ordinary user prompts that mention title generation", async () => {
+    const rawText = "RAW_DRAFT::do-not-show-this-verbatim::TOKEN_KEEP_9173"
+    let rewriteCalls = 0
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: rawText } }] }), {
+        headers: { "content-type": "application/json" },
+      })
+    installProviderRewrite({
+      owner: "/tmp/project",
+      active: () => false,
+      server: "http://opencode.internal",
+      rewrite: async (draft) => {
+        rewriteCalls += 1
+        return `Maid ${draft}`
+      },
+    })
+
+    const out = await fetch(upstream, {
+      method: "POST",
+      body: JSON.stringify({ messages: [{ role: "user", content: "Please quote: You are a title generator." }] }),
+    }).then((res) => res.text())
+
+    expect(out).toContain(rawText)
+    expect(out).not.toContain("New session")
+    expect(rewriteCalls).toBe(0)
+  })
+
+  test("trusted rewrite requests are not title-sanitized when only user content contains the marker", async () => {
+    const tokens = new Set(["trusted-token"])
+    let rewriteCalls = 0
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "Original QA_TOKEN" } }] }), {
+        headers: { "content-type": "application/json" },
+      })
+    installProviderRewrite({
+      owner: "/tmp/project",
+      active: () => false,
+      server: "http://opencode.internal",
+      consumeRewriteToken: (headers) => {
+        const token = headers.get(PROVIDER_REWRITE_HEADER)
+        if (!token || !tokens.delete(token)) return undefined
+        return "user-session"
+      },
+      rewrite: async (draft) => {
+        rewriteCalls += 1
+        return `Maid ${draft}`
+      },
+    })
+
+    const out = await fetch(upstream, {
+      method: "POST",
+      headers: { [PROVIDER_REWRITE_HEADER]: "trusted-token" },
+      body: JSON.stringify({ messages: [{ role: "user", content: "Please quote: You are a title generator." }] }),
+    }).then((res) => res.text())
+
+    expect(out).toContain("Maid Original QA_TOKEN")
+    expect(out).not.toContain("New session")
+    expect(rewriteCalls).toBe(1)
+  })
+
+  test("sanitizes title-generator responses even while a rewrite is active", async () => {
+    const rawTitle = "RAW_DRAFT::do-not-show-this-verbatim::TOKEN_KEEP_9173"
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: rawTitle } }] }), {
+        headers: { "content-type": "application/json" },
+      })
+    installProviderRewrite({
+      owner: "/tmp/project",
+      active: () => true,
+      server: "http://opencode.internal",
+      rewrite: async () => {
+        throw new Error("unexpected rewrite")
+      },
+    })
+
+    const out = await fetch(upstream, {
+      method: "POST",
+      body: JSON.stringify({ messages: [{ role: "system", content: "You are a title generator. You output ONLY a thread title." }] }),
+    }).then((res) => res.text())
+
+    expect(out).toContain("New session")
+    expect(out).not.toContain(rawTitle)
+    expect(out).not.toContain("TOKEN_KEEP_9173")
+  })
+
   test("uninstalls the command interceptor without disturbing stream gates", async () => {
     let upstreamCalls = 0
     globalThis.fetch = (async () => {

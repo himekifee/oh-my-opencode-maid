@@ -43,6 +43,8 @@ type ProviderEvent = {
 
 const key = "__ohMyOpencodeMaidStreamGate"
 export const PROVIDER_REWRITE_HEADER = "x-oh-my-opencode-maid-rewrite"
+const TITLE_GENERATOR_MARKER = "You are a title generator."
+const SAFE_TITLE = "New session"
 const enc = new TextEncoder()
 const dec = new TextDecoder()
 const providerFetches = new WeakSet<typeof fetch>()
@@ -285,6 +287,29 @@ function model(text?: string) {
   return text.includes('"messages"') || text.includes('"input"') || text.includes('"prompt"')
 }
 
+function contentText(input: unknown) {
+  if (typeof input === "string") return input
+  if (!Array.isArray(input)) return ""
+  const out: string[] = []
+  for (const item of input) {
+    if (record(item) && typeof item.text === "string") out.push(item.text)
+  }
+  return out.join("\n")
+}
+
+function titleGenerator(text?: string) {
+  if (!text) return false
+  try {
+    const parsed = JSON.parse(text) as unknown
+    if (!record(parsed) || !Array.isArray(parsed.messages)) return false
+    return parsed.messages.some((message) => record(message)
+      && message.role === "system"
+      && contentText(message.content).includes(TITLE_GENERATOR_MARKER))
+  } catch {
+    return false
+  }
+}
+
 function chat(input: Record<string, unknown>) {
   const choices = input.choices
   if (!Array.isArray(choices)) return undefined
@@ -391,6 +416,24 @@ async function pstream(res: Response, hook: ProviderHook, sessionID?: string) {
   )
 }
 
+async function ptitleStream(res: Response) {
+  const raw = await res.text()
+  const blocks = raw.split(/\n\n/)
+  let used = false
+  return clone(
+    res,
+    blocks
+      .map((block) => {
+        const event = pevent(block)
+        if (!event?.json || event.text === undefined) return block
+        const value = used ? "" : SAFE_TITLE
+        used = true
+        return block.replace(event.data, JSON.stringify(pmutate(event.json, value)))
+      })
+      .join("\n\n"),
+  )
+}
+
 async function pjson(res: Response, hook: ProviderHook, sessionID?: string) {
   const raw = await res.text()
   try {
@@ -407,17 +450,38 @@ async function pjson(res: Response, hook: ProviderHook, sessionID?: string) {
   }
 }
 
+async function ptitleJson(res: Response) {
+  const raw = await res.text()
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (!record(parsed)) return clone(res, raw)
+    const choices = parsed.choices
+    if (Array.isArray(choices) && record(choices[0]) && record(choices[0].message) && typeof choices[0].message.content === "string") {
+      return clone(res, JSON.stringify({ ...parsed, choices: choices.map((choice, index) => pmessage(choice, index === 0 ? SAFE_TITLE : "")) }))
+    }
+    return clone(res, raw)
+  } catch {
+    return clone(res, raw)
+  }
+}
+
 async function phandle(input: RequestInfo | URL, init: RequestInit | undefined, hook: ProviderHook, fetcher: typeof fetch) {
-  const body = req(init)
+  const body = await reqText(input, init)
   const rewriteSessionID = hook.consumeRewriteToken?.(reqHeaders(input, init))
   const shouldRewrite = rewriteSessionID !== undefined
+  const shouldSanitizeTitle = titleGenerator(body)
   const [cleanInput, cleanInit] = cleanRequest(input, init)
   const res = await fetcher(cleanInput, cleanInit)
-  if (hook.active()) return res
   if (!external(input, hook)) return res
   if (!model(body)) return res
-  if (!shouldRewrite) return res
   const type = res.headers.get("content-type") ?? ""
+  if (shouldSanitizeTitle) {
+    if (type.includes("text/event-stream")) return ptitleStream(res)
+    if (type.includes("application/json")) return ptitleJson(res)
+    return res
+  }
+  if (hook.active()) return res
+  if (!shouldRewrite) return res
   if (type.includes("text/event-stream")) return res
   if (type.includes("application/json")) return pjson(res, hook, rewriteSessionID)
   return res

@@ -10,6 +10,7 @@ type State = {
   hidden: ReadonlySet<string>
   passthrough: ReadonlySet<string>
   provider?: ProviderHook
+  command?: CommandHook
 }
 
 type ProviderHook = {
@@ -18,6 +19,19 @@ type ProviderHook = {
   server: string
   consumeRewriteToken?: (headers: Headers) => string | undefined
   rewrite: (text: string, sessionID?: string) => Promise<string>
+}
+
+type CommandRequest = {
+  sessionID: string
+  messageID?: string
+  arguments: string
+}
+
+type CommandHook = {
+  owner: string
+  server: string
+  command: string
+  handle: (input: CommandRequest) => Promise<unknown>
 }
 
 type ProviderEvent = {
@@ -35,6 +49,12 @@ const providerFetches = new WeakSet<typeof fetch>()
 
 function root() {
   return globalThis as typeof globalThis & { __ohMyOpencodeMaidStreamGate?: State }
+}
+
+function restoreFetchIfIdle(state: State) {
+  if (state.provider || state.command) return
+  globalThis.fetch = state.fetch
+  if (state.streamOwners.size === 0) delete root()[key]
 }
 
 function record(input: unknown): input is Record<string, unknown> {
@@ -172,6 +192,13 @@ function req(init?: RequestInit) {
   return undefined
 }
 
+async function reqText(input: RequestInfo | URL, init?: RequestInit) {
+  const body = req(init)
+  if (body !== undefined) return body
+  if (input instanceof Request) return input.clone().text()
+  return undefined
+}
+
 function reqHeaders(input: RequestInfo | URL, init?: RequestInit) {
   const out = new Headers(input instanceof Request ? input.headers : undefined)
   if (init?.headers) for (const [key, value] of new Headers(init.headers)) out.set(key, value)
@@ -198,6 +225,59 @@ function external(input: RequestInfo | URL, hook: ProviderHook) {
     // Unparseable URL: treat as external so it is never mistaken for the local server.
     return true
   }
+}
+
+function localUrl(input: RequestInfo | URL, server: string) {
+  const url = typeof input === "string" || input instanceof URL ? input : input.url
+  try {
+    const parsed = new URL(url, server)
+    return parsed.origin === server ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function requestMethod(input: RequestInfo | URL, init?: RequestInit) {
+  return (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase()
+}
+
+function commandSession(pathname: string) {
+  const match = /^\/session\/([^/]+)\/command$/.exec(pathname)
+  return match?.[1] ? decodeURIComponent(match[1]) : undefined
+}
+
+function text(input: Record<string, unknown>, key: string) {
+  const value = input[key]
+  return typeof value === "string" ? value : undefined
+}
+
+async function commandBody(input: RequestInfo | URL, init: RequestInit | undefined) {
+  const body = await reqText(input, init)
+  if (!body) return undefined
+  try {
+    const parsed = JSON.parse(body) as unknown
+    return record(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function chandle(input: RequestInfo | URL, init: RequestInit | undefined, hook: CommandHook) {
+  if (requestMethod(input, init) !== "POST") return undefined
+  const url = localUrl(input, hook.server)
+  if (!url) return undefined
+  const sessionID = commandSession(url.pathname)
+  if (!sessionID) return undefined
+  const body = await commandBody(input, init)
+  if (body?.command !== hook.command) return undefined
+  return new Response(JSON.stringify(await hook.handle({
+    sessionID,
+    messageID: text(body, "messageID"),
+    arguments: text(body, "arguments") ?? "",
+  })), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  })
 }
 
 function model(text?: string) {
@@ -343,6 +423,19 @@ async function phandle(input: RequestInfo | URL, init: RequestInit | undefined, 
   return res
 }
 
+function installFetchPatch(state: State) {
+  if (globalThis.fetch !== state.fetch) return
+  const base = state.fetch
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const state = root()[key]
+    if (!state) return base(input, init)
+    const intercepted = state.command ? await chandle(input, init, state.command) : undefined
+    if (intercepted) return intercepted
+    if (state.provider) return phandle(input, init, state.provider, state.fetch)
+    return base(input, init)
+  }) as typeof fetch
+}
+
 export function installPublicStreamGate(hidden: ReadonlySet<string>, passthrough: ReadonlySet<string> = new Set(), owner = "default") {
   const box = root()
   box[key] = box[key] ?? {
@@ -410,20 +503,40 @@ export function installProviderRewrite(hook: ProviderHook) {
   }
   const state = box[key]
   state.provider = hook
-  if (globalThis.fetch === state.fetch) {
-    const base = state.fetch
-    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-      const state = root()[key]
-      if (!state?.provider) return base(input, init)
-      return phandle(input, init, state.provider, state.fetch)
-    }) as typeof fetch
+  installFetchPatch(state)
+  return state.fetch
+}
+
+export function installCommandInterceptor(hook: CommandHook) {
+  const box = root()
+  box[key] = box[key] ?? {
+    response: globalThis.Response,
+    emit: EventEmitter.prototype.emit,
+    fetch: globalThis.fetch,
+    post: typeof globalThis.postMessage === "function" ? globalThis.postMessage : undefined,
+    open: new Set<string>(),
+    streamOwners: new Set<string>(),
+    hidden: new Set<string>(),
+    passthrough: new Set<string>(),
   }
+  const state = box[key]
+  state.command = hook
+  installFetchPatch(state)
   return state.fetch
 }
 
 export function uninstallProviderRewrite(owner: string) {
   const state = root()[key]
-  if (state?.provider?.owner === owner) state.provider = undefined
+  if (state?.provider?.owner !== owner) return
+  state.provider = undefined
+  restoreFetchIfIdle(state)
+}
+
+export function uninstallCommandInterceptor(owner: string) {
+  const state = root()[key]
+  if (state?.command?.owner !== owner) return
+  state.command = undefined
+  restoreFetchIfIdle(state)
 }
 
 export function uninstallPublicStreamGate(owner = "default") {
@@ -434,10 +547,7 @@ export function uninstallPublicStreamGate(owner = "default") {
   globalThis.Response = state.response
   EventEmitter.prototype.emit = state.emit
   if (state.post) globalThis.postMessage = state.post as typeof globalThis.postMessage
-  if (!state.provider) {
-    globalThis.fetch = state.fetch
-    delete root()[key]
-  }
+  restoreFetchIfIdle(state)
 }
 
 export function createProviderFetch(hook: ProviderHook, fetcher: typeof fetch = fetch) {

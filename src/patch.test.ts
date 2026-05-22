@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { EventEmitter } from "node:events"
-import { PROVIDER_REWRITE_HEADER, installProviderRewrite, installPublicStreamGate, resetPublicStreamGate, uninstallPublicStreamGate } from "./patch"
+import { PROVIDER_REWRITE_HEADER, installCommandInterceptor, installProviderRewrite, installPublicStreamGate, resetPublicStreamGate, uninstallCommandInterceptor, uninstallPublicStreamGate } from "./patch"
 
 const enc = new TextEncoder()
 const upstream = `http://127.0.0.1:48765/v1/${"chat"}/${"completions"}`
@@ -32,6 +32,10 @@ async function text(body: string) {
 
 function frame(input: unknown) {
   return `data: ${JSON.stringify(input)}\n\n`
+}
+
+function record(input: unknown): input is Record<string, unknown> {
+  return Boolean(input) && typeof input === "object" && !Array.isArray(input)
 }
 
 function chunk(value: string, finish: string | null = null) {
@@ -284,5 +288,35 @@ describe("public stream gate", () => {
     expect(raw).toContain("Original QA_TOKEN")
     expect(raw).not.toContain("Maid Original QA_TOKEN")
     expect(upstreamHeaders.every((headers) => !headers.has(PROVIDER_REWRITE_HEADER))).toBe(true)
+  })
+
+  test("uninstalls the command interceptor without disturbing stream gates", async () => {
+    let upstreamCalls = 0
+    globalThis.fetch = (async () => {
+      upstreamCalls += 1
+      return new Response("upstream")
+    }) as typeof fetch
+    installPublicStreamGate(new Set(), new Set(), "stream-owner")
+    installCommandInterceptor({
+      owner: "command-owner",
+      server: "http://opencode.internal",
+      command: "maid-rewrite-toggle",
+      handle: async (input) => ({ info: { sessionID: input.sessionID }, parts: [] }),
+    })
+
+    const intercepted = await fetch("http://opencode.internal/session/user-session/command", {
+      method: "POST",
+      body: JSON.stringify({ command: "maid-rewrite-toggle", arguments: "" }),
+    }).then((res) => res.json()) as unknown
+    uninstallCommandInterceptor("command-owner")
+    const passed = await fetch("http://opencode.internal/session/user-session/command", {
+      method: "POST",
+      body: JSON.stringify({ command: "maid-rewrite-toggle", arguments: "" }),
+    }).then((res) => res.text())
+
+    expect(record(intercepted) && record(intercepted.info) ? intercepted.info.sessionID : undefined).toBe("user-session")
+    expect(passed).toBe("upstream")
+    expect(upstreamCalls).toBe(1)
+    expect(await text(frame(delta()))).not.toContain("raw draft")
   })
 })

@@ -126,7 +126,7 @@ On startup the plugin seeds a global user config at
 
 There are no separate endpoint, secret, deadline, canned-response, or invasive toggle settings.
 
-The server plugin registers `/maid-rewrite-toggle`. Running it flips the persisted global `enabled` config, applies the new state immediately in the current OpenCode server process, and shows a status toast. OpenCode still treats custom slash commands as prompt turns, so the command may also produce a short command-result assistant message after the toast; the runtime toggle has already happened before that response.
+The server plugin registers `/maid-rewrite-toggle` for slash-command discoverability. OpenCode does not currently expose a server-plugin "handled command" API, so the plugin handles this command in `command.execute.before`: it flips the persisted global `enabled` config, applies the new state immediately in the current server process, shows a status toast, then aborts the command before OpenCode can call the LLM. This prevents an assistant command-result turn; depending on OpenCode's TUI behavior, a short handled-error notification or an empty session shell may still appear.
 
 ## 🎭 The default persona — Yuzuki
 
@@ -168,7 +168,7 @@ bun run typecheck
 bun run build
 ```
 
-Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled` and showing the matching status toast. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, successful rewrites should show a local collapsed `+ Original Draft Content` renderer row when the host tree is available; it should expand inline on click, collapse on the next click, and never put raw original text into message history, logs, export, compaction, host decoration hints, or overlays. Fallback rows should open a local dialog, and `/maid-original` should reopen the sidecar original without changing session history.
+Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled`, showing the matching status toast, and not calling the model for a command-result assistant turn. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, successful rewrites should show a local collapsed `+ Original Draft Content` renderer row when the host tree is available; it should expand inline on click, collapse on the next click, and never put raw original text into message history, logs, export, compaction, host decoration hints, or overlays. Fallback rows should open a local dialog, and `/maid-original` should reopen the sidecar original without changing session history.
 
 ## 📜 License
 

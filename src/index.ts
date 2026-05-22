@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto"
 import { MAIN_AGENT_MODEL, REWRITE_CONTEXT_MAX, applyMainConfig, loadConfig, toggleRewriteEnabled } from "./config"
 import { FAILURE, finalResult, HANDOFF, handoffSystemPrompt, maidAgentPrompt, split, type FinalTextResult, type RewriteContextEntry } from "./rewrite"
 import { REWRITE_AGENT, SESSION_META_LOOKUP_FAILED, createDeltaSuppressor, disabledTools, formatModel, getSessionMeta, resolveModel, runMaid, type ModelSpec, type SessionMeta } from "./opencode"
-import { PROVIDER_REWRITE_HEADER, createProviderFetch, installProviderRewrite, installPublicStreamGate, uninstallProviderRewrite, uninstallPublicStreamGate } from "./patch"
+import { PROVIDER_REWRITE_HEADER, createProviderFetch, installCommandInterceptor, installProviderRewrite, installPublicStreamGate, uninstallProviderRewrite, uninstallPublicStreamGate } from "./patch"
 import { createResponseStore, type PendingProviderOriginal, type ResponseKey, type ResponseStore } from "./responses"
 import { DISPLAY_ONLY_FALLBACK } from "./fallback"
 
@@ -82,6 +82,7 @@ const permission = {
 const MAX_DRAFT = 200_000
 const PROVIDER_TOKEN_TTL = 10 * 60 * 1000
 const TOGGLE_COMMAND = "maid-rewrite-toggle"
+const TOGGLE_HANDLED = "OMO_MAID_REWRITE_TOGGLE_HANDLED"
 
 function record(input: unknown): input is Record<string, unknown> {
   return Boolean(input) && typeof input === "object" && !Array.isArray(input)
@@ -476,6 +477,64 @@ const MaidPlugin: Plugin = async (ctx) => {
     }
   }
 
+  const commandMessage = (sessionID: string, text: string) => {
+    const now = Date.now()
+    const messageID = `msg_maid_rewrite_toggle_${randomUUID()}`
+    const partID = `prt_maid_rewrite_toggle_${randomUUID()}`
+    return {
+      info: {
+        id: messageID,
+        sessionID,
+        role: "assistant",
+        time: { created: now, completed: now },
+        parentID: sessionID,
+        modelID: "oh-my-opencode-maid",
+        providerID: "oh-my-opencode-maid",
+        mode: "command",
+        agent: "command",
+        path: { cwd: ctx.directory, root: ctx.directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        finish: "stop",
+      },
+      parts: [{ id: partID, sessionID, messageID, type: "text", text, synthetic: true, time: { start: now, end: now } }],
+    }
+  }
+
+  const toggleCommand = async ({ sessionID }: { sessionID: string; messageID?: string; arguments: string }) => {
+    const previous = isEnabled()
+    try {
+      const result = await toggleRewriteEnabled()
+      await setRuntimeEnabled(result.enabled)
+      const label = result.enabled ? "enabled" : "disabled"
+      const message = `Maid rewrites are now ${label}.`
+      await toast({
+        variant: "success",
+        title: result.enabled ? "Rewrite enabled" : "Rewrite disabled",
+        message,
+        duration: 5000,
+      })
+      return commandMessage(sessionID, message)
+    } catch (error) {
+      await setRuntimeEnabled(previous)
+      const message = error instanceof Error ? error.message : "Unknown rewrite toggle error"
+      await toast({
+        variant: "error",
+        title: "Rewrite toggle failed",
+        message,
+        duration: 5000,
+      })
+      return commandMessage(sessionID, `Maid rewrite toggle failed: ${message}`)
+    }
+  }
+
+  installCommandInterceptor({
+    owner: ctx.directory,
+    server: ctx.serverUrl.origin,
+    command: TOGGLE_COMMAND,
+    handle: toggleCommand,
+  })
+
   return {
     config: async (input) => {
       applyMainConfig(cfg, input)
@@ -586,30 +645,10 @@ const MaidPlugin: Plugin = async (ctx) => {
 
     "command.execute.before": async (input, output) => {
       if (input.command !== TOGGLE_COMMAND) return
-      const previous = isEnabled()
-      try {
-        const result = await toggleRewriteEnabled()
-        await setRuntimeEnabled(result.enabled)
-        const label = result.enabled ? "enabled" : "disabled"
-        const message = `Maid rewrites are now ${label}.`
-        setCommandOutput(output.parts, message)
-        await toast({
-          variant: "success",
-          title: result.enabled ? "Rewrite enabled" : "Rewrite disabled",
-          message,
-          duration: 5000,
-        })
-      } catch (error) {
-        await setRuntimeEnabled(previous)
-        const message = error instanceof Error ? error.message : "Unknown rewrite toggle error"
-        setCommandOutput(output.parts, `Maid rewrite toggle failed: ${message}`)
-        await toast({
-          variant: "error",
-          title: "Rewrite toggle failed",
-          message,
-          duration: 5000,
-        })
-      }
+      const response = await toggleCommand({ sessionID: input.sessionID, arguments: input.arguments })
+      const part = response.parts.find((part) => part.type === "text")
+      setCommandOutput(output.parts, part?.text ?? "Maid rewrite toggle completed.")
+      throw new Error(TOGGLE_HANDLED)
     },
 
     "experimental.text.complete": async (input, output) => {

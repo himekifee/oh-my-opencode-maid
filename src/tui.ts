@@ -113,6 +113,8 @@ type FallbackRef = ResponseKey & {
   visibleText: string
 }
 
+type DecorationRef = Pick<ResponseKey, "sessionID" | "messageID" | "partID">
+
 const MAX_DISPLAY_CHARS = 20_000
 const DEBUG_ENV = "OH_MY_OPENCODE_MAID_TUI_DEBUG"
 const RENDERER_RETRY_MS = 50
@@ -120,6 +122,7 @@ const RENDERER_RETRY_LIMIT = 30
 const SESSION_HYDRATION_RETRY_LIMIT = 120
 const SESSION_ROUTE_POLL_MS = 250
 const RENDERER_TREE_LIMIT = 80
+const RENDERER_DECORATION_PREFIX = "oh-my-opencode-maid-original-"
 const INLINE_DRAFT_COLLAPSED = "+ Original Draft Content"
 const INLINE_DRAFT_EXPANDED = "- Original Draft Content"
 const OVERLAY_FG = colorFromInts(139, 148, 158)
@@ -249,12 +252,24 @@ function findTextTarget(root: unknown, ref: FallbackRef) {
   return candidates.find((item) => item.id.startsWith("text-") && item.id.includes(ref.partID))
 }
 
-function rendererDecorationID(ref: ResponseKey) {
-  return `oh-my-opencode-maid-original-${ref.messageID}-${ref.partID}`
+function rendererDecorationID(ref: DecorationRef) {
+  return `${RENDERER_DECORATION_PREFIX}${ref.messageID}-${ref.partID}`
 }
 
-function rendererDecorationBodyID(ref: ResponseKey) {
+function rendererDecorationBodyID(ref: DecorationRef) {
   return `${rendererDecorationID(ref)}-body`
+}
+
+function isRendererDecorationRowID(id: string) {
+  return id.startsWith(RENDERER_DECORATION_PREFIX) && !id.endsWith("-body")
+}
+
+function decorationRefFromRendererDecorationRowID(id: string, sessionID: string): DecorationRef | undefined {
+  if (!isRendererDecorationRowID(id)) return undefined
+  const suffix = id.slice(RENDERER_DECORATION_PREFIX.length)
+  const separator = suffix.lastIndexOf("-")
+  if (separator <= 0 || separator >= suffix.length - 1) return undefined
+  return { sessionID, messageID: suffix.slice(0, separator), partID: suffix.slice(separator + 1) }
 }
 
 function refDebug(ref: FallbackRef) {
@@ -345,8 +360,16 @@ function successfulRewriteRefFromEvent(api: TuiApi, event: unknown): FallbackRef
   return undefined
 }
 
-function decorationKey(ref: ResponseKey) {
+function decorationKey(ref: DecorationRef) {
   return `${ref.sessionID}\0${ref.messageID}\0${ref.partID}`
+}
+
+function parseDecorationKey(key: string): DecorationRef | undefined {
+  const parts = key.split("\0")
+  if (parts.length !== 3) return undefined
+  const [sessionID, messageID, partID] = parts
+  if (!sessionID || !messageID || !partID) return undefined
+  return { sessionID, messageID, partID }
 }
 
 function currentSessionID(api: TuiApi) {
@@ -513,13 +536,14 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   }
 
   const disposeRendererDecoration = (ref: FallbackRef, parent: HostRenderable, row: HostRenderable) => {
+    const currentParent = hostRenderable(row.parent) ? row.parent : parent
     try {
-      parent.remove?.(row.id)
+      currentParent.remove?.(row.id)
     } catch (error) {
       debugTui("renderer.dispose.failed", { messageID: ref.messageID, partID: ref.partID, error: error instanceof Error ? error.message : String(error) })
     }
     destroyRendererRow(ref, row)
-    parent.requestRender?.()
+    currentParent.requestRender?.()
     api.renderer?.requestRender?.()
   }
 
@@ -720,6 +744,89 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
     pendingRendererDecorations.delete(key)
   }
 
+  const currentSessionDecorationState = (sessionID: string) => {
+    const messageIDs = new Set<string>()
+    const loadedPartMessageIDs = new Set<string>()
+    const liveKeys = new Set<string>()
+    const liveRefs: FallbackRef[] = []
+    for (const msg of api.state.session.messages(sessionID)) {
+      const messageID = stringField(msg, "id") ?? stringField(msg, "messageID")
+      if (!messageID) continue
+      messageIDs.add(messageID)
+      const messageParts = api.state.part(messageID)
+      if (messageParts.length > 0) loadedPartMessageIDs.add(messageID)
+      for (const part of messageParts) {
+        const ref = successfulRewriteRefFromPart(api.state.path.directory, part)
+        if (ref?.sessionID === sessionID) {
+          liveKeys.add(decorationKey(ref))
+          liveRefs.push(ref)
+        }
+      }
+    }
+    return { messageIDs, loadedPartMessageIDs, liveKeys, liveRefs }
+  }
+
+  const cleanupStaleCurrentSessionDecorations = () => {
+    const sessionID = currentSessionID(api)
+    if (!sessionID) return
+    const { messageIDs, loadedPartMessageIDs, liveKeys, liveRefs } = currentSessionDecorationState(sessionID)
+    const refFromDecorationRowID = (id: string) => {
+      for (const ref of liveRefs) {
+        if (rendererDecorationID(ref) === id) return ref
+      }
+      for (const key of new Set([...activeDecorations.keys(), ...pendingRendererDecorations.keys()])) {
+        const ref = parseDecorationKey(key)
+        if (ref?.sessionID === sessionID && rendererDecorationID(ref) === id) return ref
+      }
+      return decorationRefFromRendererDecorationRowID(id, sessionID)
+    }
+    const isStale = (key: string) => {
+      const ref = parseDecorationKey(key)
+      if (!ref || ref.sessionID !== sessionID) return false
+      if (!messageIDs.has(ref.messageID)) return true
+      return loadedPartMessageIDs.has(ref.messageID) && !liveKeys.has(key)
+    }
+    for (const key of [...activeDecorations.keys()]) {
+      if (isStale(key)) disposeActiveDecoration(key)
+    }
+    for (const key of [...pendingRendererDecorations.keys()]) {
+      if (isStale(key)) clearRendererRetry(key)
+    }
+
+    const root = rendererRoot()
+    if (!root) return
+    for (const row of walkRenderables(root, 500)) {
+      if (!isRendererDecorationRowID(row.id)) continue
+      const ref = refFromDecorationRowID(row.id)
+      if (!ref) continue
+      if (ref.sessionID !== sessionID) continue
+
+      const fallbackRef: FallbackRef = { ...ref, directory: api.state.path.directory, visibleText: DISPLAY_ONLY_FALLBACK }
+      const target = findTextTarget(root, fallbackRef)
+      const rowParent = hostRenderable(row.parent) ? row.parent : undefined
+      const targetParent = target && hostRenderable(target.parent) ? target.parent : undefined
+      const siblings = rowParent ? hostChildren(rowParent) : []
+      const rowIndex = siblings.indexOf(row)
+      const targetIndex = target ? siblings.indexOf(target) : -1
+      if (target && rowParent && rowParent === targetParent && rowIndex >= 0 && targetIndex >= 0 && rowIndex < targetIndex) continue
+
+      const key = decorationKey(ref)
+      const hadActiveDecoration = activeDecorations.has(key)
+      if (hadActiveDecoration) disposeActiveDecoration(key)
+      clearRendererRetry(key)
+      if (!hadActiveDecoration && rowParent) disposeRendererDecoration(fallbackRef, rowParent, row)
+      else if (!hadActiveDecoration) destroyRendererRow(fallbackRef, row)
+    }
+  }
+
+  const isCurrentCompletedPartUpdate = (event: unknown) => {
+    if (!record(event) || event.type !== "message.part.updated") return false
+    const properties = record(event.properties) ? event.properties : undefined
+    const part = record(properties?.part) ? properties.part : undefined
+    const sessionID = stringField(part, "sessionID")
+    return sessionID !== undefined && sessionID === currentSessionID(api) && record(part?.time) && typeof part.time.end === "number"
+  }
+
   const scheduleRendererRetry = (ref: FallbackRef) => {
     const key = decorationKey(ref)
     if (pendingRendererDecorations.has(key)) return
@@ -745,6 +852,7 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
 
   const unsubscribeEvent = api.event.on("message.part.updated", (event) => {
     debugTui("event.message.part.updated", eventDebug(event))
+    if (isCurrentCompletedPartUpdate(event)) cleanupStaleCurrentSessionDecorations()
     const fallbackRef = fallbackRefFromEvent(api.state.path.directory, event)
     if (fallbackRef) {
       if (hasOriginal(store, fallbackRef) && isCurrentSessionRef(api, fallbackRef)) {
@@ -803,6 +911,7 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
         }
       }
     }
+    cleanupStaleCurrentSessionDecorations()
     return {
       settled: messages.length > 0 && refs > 0 && missingParts === 0 && pendingAttachments === 0,
       messages: messages.length,
@@ -856,7 +965,10 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
 
   const handleSessionRouteChange = () => {
     const sessionID = currentSessionID(api)
-    if (sessionID === lastSessionID) return
+    if (sessionID === lastSessionID) {
+      cleanupStaleCurrentSessionDecorations()
+      return
+    }
     const previousSessionID = lastSessionID
     lastSessionID = sessionID
     clearSessionHydrationRetry()

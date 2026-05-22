@@ -1143,6 +1143,78 @@ describe("tui fallback display", () => {
     })
   })
 
+  test("sweeps orphaned original draft renderer rows when the text target disappears", async () => {
+    await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
+      const realSetInterval = globalThis.setInterval
+      const realClearInterval = globalThis.clearInterval
+      const routeWatchers: Array<() => void> = []
+      globalThis.setInterval = ((handler: TimerHandler) => {
+        if (typeof handler === "function") routeWatchers.push(handler as () => void)
+        return routeWatchers.length as unknown as ReturnType<typeof setInterval>
+      }) as typeof setInterval
+      globalThis.clearInterval = (() => undefined) as typeof clearInterval
+      try {
+        const store = await createResponseStore()
+        store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m1", partID: "p1" }, "Final 1", "Raw 1")
+        store.putDisplayOriginal({ directory: dir, sessionID: "user-session", messageID: "m2", partID: "p2" }, "Final 2", "Raw 2")
+        store.close()
+
+        const runtime = fakeApi(dir)
+        const root = new FakeRenderable({}, { id: "root" })
+        const m1 = new FakeRenderable({}, { id: "message-m1" })
+        const p1 = new FakeTextRenderable({}, { id: "text-p1" })
+        const m2 = new FakeRenderable({}, { id: "message-m2" })
+        const p2 = new FakeTextRenderable({}, { id: "text-p2" })
+        root.add(m1)
+        m1.add(p1)
+        root.add(m2)
+        m2.add(p2)
+        runtime.api.renderer = fakeRenderer(root)
+        runtime.messages["user-session"] = ["m1", "m2"]
+        runtime.parts["m1"] = [{
+          id: "p1",
+          sessionID: "user-session",
+          messageID: "m1",
+          type: "text",
+          text: "Final 1",
+          time: { start: 1, end: 2 },
+        }]
+        runtime.parts["m2"] = [{
+          id: "p2",
+          sessionID: "user-session",
+          messageID: "m2",
+          type: "text",
+          text: "Final 2",
+          time: { start: 1, end: 2 },
+        }]
+
+        await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+
+        expect(routeWatchers).toHaveLength(1)
+        const row1 = m1.children.find((child) => child.id === "oh-my-opencode-maid-original-m1-p1")
+        const row2 = m2.children.find((child) => child.id === "oh-my-opencode-maid-original-m2-p2")
+        expect(row1).toBeDefined()
+        expect(row2).toBeDefined()
+
+        m2.remove(p2.id)
+        routeWatchers[0]?.()
+
+        expect(m2.children.some((child) => child.id === "oh-my-opencode-maid-original-m2-p2")).toBe(false)
+        expect(row2!.destroyed).toBe(true)
+        expect(runtime.messages["user-session"]).toEqual(["m1", "m2"])
+        expect(runtime.parts["m2"]).toHaveLength(1)
+        expect(m1.children.indexOf(row1!)).toBe(m1.children.indexOf(p1) - 1)
+        expect(row1!.destroyed).toBe(false)
+
+        await runtime.dispose?.()
+      } finally {
+        globalThis.setInterval = realSetInterval
+        globalThis.clearInterval = realClearInterval
+      }
+    })
+  })
+
   test("default export is a TUI module with a stable id and without a named tui export", async () => {
     const exports = await import("./tui")
 

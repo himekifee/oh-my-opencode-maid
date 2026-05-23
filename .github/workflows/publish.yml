@@ -102,6 +102,17 @@ jobs:
       - name: Build changelog
         id: changelog
         uses: mikepenz/release-changelog-builder-action@v5
+        with:
+          mode: "COMMIT"
+          configurationJson: |
+            {
+              "template": "#{{CHANGELOG}}",
+              "pr_template": "- #{{TITLE}} (#{{MERGE_SHA}})",
+              "empty_template": "- no changes",
+              "categories": [
+                { "title": "## Changes", "labels": [], "rules": [{ "pattern": ".*", "on_property": "title" }] }
+              ]
+            }
         env:
           GITHUB_TOKEN: ${{ github.token }}
 

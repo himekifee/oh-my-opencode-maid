@@ -591,6 +591,7 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
     let body: HostRenderable | undefined
     let expandedText: string | undefined
     let dragged = false
+    let lastWidth: number | undefined
     const destroyBody = () => {
       if (!body) return
       try {
@@ -677,6 +678,12 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
         focusable: true,
         renderAfter: (buffer: HostBuffer) => {
           if (!row) return
+          const width = finiteNumber(row.width)
+          if (expandedText !== undefined && lastWidth !== width) {
+            lastWidth = width
+            updateInlineDraftRow(row, expandedText)
+            syncBody()
+          }
           drawInlineDraftRow(row, buffer, expandedText)
         },
         onMouseDown: () => {

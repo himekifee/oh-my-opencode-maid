@@ -588,6 +588,48 @@ describe("tui fallback display", () => {
     })
   })
 
+  test("recomputes body dimensions when row width changes during render", async () => {
+    await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
+      const store = await createResponseStore()
+      store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Rewritten text", "Original text that is long enough to wrap when the width is small")
+      store.close()
+      const runtime = fakeApi(dir)
+      const root = new FakeRenderable({}, { id: "root" })
+      const parent = new FakeRenderable({}, { id: "message-m" })
+      const target = new FakeTextRenderable({}, { id: "text-p", screenX: 4, screenY: 7, width: 48, height: 2 })
+      root.add(parent)
+      parent.add(target)
+      const renderer = fakeRenderer(root)
+      runtime.api.renderer = renderer
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+      runtime.handlers["message.part.updated"]?.({ type: "message.part.updated", properties: { part: rewritePart() } })
+
+      const row = parent.children.find((child) => child.id === "oh-my-opencode-maid-original-m-p")
+      expect(row).toBeDefined()
+      if (row) row.width = 48
+
+      row?.onMouseDown?.({ y: 1, preventDefault() {}, stopPropagation() {} })
+      row?.onMouseUp?.({ y: 1, preventDefault() {}, stopPropagation() {} })
+      renderRow(row!)
+
+      const body = row?.children.find((child) => child.id === "oh-my-opencode-maid-original-m-p-body")
+      expect(body).toBeDefined()
+      expect(body?.options.width).toBe(44)
+      const oldHeight = body?.options.height
+      if (typeof oldHeight !== "number") throw new Error("expected numeric original draft body height")
+
+      if (row) row.width = 20
+      renderRow(row!)
+
+      expect(body?.options.width).toBe(16)
+      expect(body?.options.height).toBeGreaterThan(oldHeight)
+
+      await runtime.dispose?.()
+    })
+  })
+
   test("keeps the initially collapsed renderer row compact before layout reports width", async () => {
     await isolated(async (dir) => {
       await writeConfig({ show_original_draft: true })

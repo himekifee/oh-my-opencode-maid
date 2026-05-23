@@ -1,9 +1,17 @@
 {
   "name": "oh-my-opencode-maid",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenCode plugin that rewrites assistant replies through a hidden rewrite agent.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/himekifee/oh-my-opencode-maid.git"
+  },
+  "homepage": "https://github.com/himekifee/oh-my-opencode-maid#readme",
+  "bugs": {
+    "url": "https://github.com/himekifee/oh-my-opencode-maid/issues"
+  },
   "engines": {
     "bun": ">=1.1.0"
   },

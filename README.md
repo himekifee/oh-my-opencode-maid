@@ -9,7 +9,7 @@
 [![Built with Bun](https://img.shields.io/badge/built%20with-Bun-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![zod](https://img.shields.io/badge/validated%20with-zod-3e67b1)](https://zod.dev)
-![version](https://img.shields.io/badge/version-0.2.0-blueviolet)
+![version](https://img.shields.io/badge/version-0.2.1-blueviolet)
 
 **English** · [简体中文](./README.zh-CN.md)
 
@@ -95,7 +95,7 @@ Pin a specific version for reproducible installs:
 
 ```jsonc
 {
-  "plugin": ["oh-my-opencode-maid@0.2.0"]
+  "plugin": ["oh-my-opencode-maid@0.2.1"]
 }
 ```
 

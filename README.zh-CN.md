@@ -40,6 +40,15 @@
 
 事实、代码、命令、路径、URL、数字、markdown 结构全都原样保留 —— 变的只有语气。
 
+## 📸 实机截图
+
+<p align="center">
+  <a href="docs/images/20260520-225528.png"><img src="docs/images/20260520-225528.png" width="24%" /></a>
+  <a href="docs/images/20260520-225750.png"><img src="docs/images/20260520-225750.png" width="24%" /></a>
+  <a href="docs/images/20260521-170317.png"><img src="docs/images/20260521-170317.png" width="24%" /></a>
+  <a href="docs/images/20260523-001246.png"><img src="docs/images/20260523-001246.png" width="24%" /></a>
+</p>
+
 ## 🧩 工作原理
 
 | 阶段 | 发生了什么 |

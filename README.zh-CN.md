@@ -68,10 +68,26 @@
 
 > **运行环境要求：** 仅支持 Bun。插件用到了 `bun:sqlite` 和 Bun 的文件 API，在原生 Node.js 下无法运行。OpenCode 本身就用 Bun 跑插件，所以正常安装不需要额外操作。
 
-只需写好配置 —— OpenCode 会自动从 npm 下载已发布的包。在 `.opencode/opencode.jsonc`（或你的全局 `opencode.jsonc`）里注册**服务端**插件：
+### 推荐方式：一条命令
+
+```bash
+opencode plugin oh-my-opencode-maid       # 当前项目
+opencode plugin -g oh-my-opencode-maid    # 全局
+```
+
+OpenCode 的 CLI 会自动帮你注册**两个**入口 —— `oh-my-opencode-maid` 写进服务端配置（`opencode.json` / `.opencode/opencode.jsonc`），`oh-my-opencode-maid/tui` 写进 TUI 配置（`~/.opencode/tui.json`），并从 npm 拉取包。想换锁定版本就加 `-f` 重跑一次。
+
+完事。除非你有特殊需求，否则不用看下面的手动方式。
+
+### 手动方式：自己改配置
+
+这个包有**两个**互相独立的入口 —— 服务端插件和 TUI 插件，OpenCode 会从**两个不同的文件**里加载它们。你要全权控制的话可以手写：
+
+**1. 服务端插件（必装）** —— `~/.config/opencode/opencode.json`，或者按项目放在 `.opencode/opencode.jsonc`：
 
 ```jsonc
 {
+  "$schema": "https://opencode.ai/config.json",
   "plugin": ["oh-my-opencode-maid"]
 }
 ```
@@ -84,7 +100,16 @@
 }
 ```
 
-这个包还单独导出了一个 **TUI** 入口 `oh-my-opencode-maid/tui`。它要通过 OpenCode 的 TUI 插件管理器来启用 —— **千万别**把 TUI 入口写进 `opencode.jsonc`：那个配置加载的是服务端运行时，而 TUI 入口是特意设计成「不走服务端钩子」的。
+**2. TUI 插件（可选，用来开启「原始草稿」折叠开关）** —— TUI 入口导出为 `oh-my-opencode-maid/tui`，**必须写在另一个文件里** —— `~/.opencode/tui.json`，**不要**写进 `opencode.json`。这两份配置加载到完全不同的运行时，混着写最多就是无效。
+
+```jsonc
+// ~/.opencode/tui.json
+{
+  "plugin": ["oh-my-opencode-maid/tui"]
+}
+```
+
+不装也完全能跑，只是会少掉 [可选的 TUI 入口](#️-可选的-tui-入口) 里描述的那个本地 `+ Original Draft Content` 折叠行。
 
 <details>
 <summary>从源码安装（开发用）</summary>
@@ -95,8 +120,16 @@ bun run build
 ```
 
 ```jsonc
+// ~/.config/opencode/opencode.json
 {
   "plugin": ["file:///absolute/path/to/oh-my-opencode-maid/dist/index.js"]
+}
+```
+
+```jsonc
+// ~/.opencode/tui.json
+{
+  "plugin": ["file:///absolute/path/to/oh-my-opencode-maid/dist/tui.js"]
 }
 ```
 

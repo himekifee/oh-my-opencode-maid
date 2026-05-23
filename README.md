@@ -67,15 +67,31 @@ Patches are reference-counted per project directory and torn down when the last 
 
 > **Requirements:** Bun-only. The plugin uses `bun:sqlite` and Bun file APIs and will not run under plain Node.js. OpenCode already runs plugins under Bun, so a normal install needs nothing extra.
 
-Just write the config — OpenCode downloads the published package from npm automatically. Register the **server** plugin in `.opencode/opencode.jsonc` (or your global `opencode.jsonc`):
+### Recommended: one command
+
+```bash
+opencode plugin oh-my-opencode-maid       # current project
+opencode plugin -g oh-my-opencode-maid    # global
+```
+
+OpenCode's CLI registers **both** entries for you — `oh-my-opencode-maid` into the server config (`opencode.json` / `.opencode/opencode.jsonc`) and `oh-my-opencode-maid/tui` into the TUI config (`~/.opencode/tui.json`) — and pulls the package from npm. Re-run with `-f` to bump the pinned version.
+
+That's it. Skip the manual section below unless you need a non-standard setup.
+
+### Manual: edit the configs yourself
+
+The package has **two** independent entry points — server plugin and TUI plugin — that OpenCode loads from two different files. You can write them by hand if you want full control.
+
+**1. Server plugin (required)** — `~/.config/opencode/opencode.json`, or per-project `.opencode/opencode.jsonc`:
 
 ```jsonc
 {
+  "$schema": "https://opencode.ai/config.json",
   "plugin": ["oh-my-opencode-maid"]
 }
 ```
 
-Pin a specific version if you prefer reproducible installs:
+Pin a specific version for reproducible installs:
 
 ```jsonc
 {
@@ -83,7 +99,16 @@ Pin a specific version if you prefer reproducible installs:
 }
 ```
 
-The package also ships a separate **TUI** entry exported as `oh-my-opencode-maid/tui`. Enable it through OpenCode's TUI plugin manager — **do not** add the TUI entry to `opencode.jsonc`; that config loads the server runtime, and the TUI entry is intentionally not a server hook.
+**2. TUI plugin (optional, for the original-draft toggle)** — the TUI entry is exported as `oh-my-opencode-maid/tui` and **must be registered in a separate file** — `~/.opencode/tui.json` — *not* in `opencode.json`. The two configs load into different runtimes; mixing them is a no-op at best.
+
+```jsonc
+// ~/.opencode/tui.json
+{
+  "plugin": ["oh-my-opencode-maid/tui"]
+}
+```
+
+Without it, everything still works — you just lose the local `+ Original Draft Content` collapsible row described in [Optional TUI entry](#-optional-tui-entry).
 
 <details>
 <summary>Install from source (development)</summary>
@@ -94,8 +119,16 @@ bun run build
 ```
 
 ```jsonc
+// ~/.config/opencode/opencode.json
 {
   "plugin": ["file:///absolute/path/to/oh-my-opencode-maid/dist/index.js"]
+}
+```
+
+```jsonc
+// ~/.opencode/tui.json
+{
+  "plugin": ["file:///absolute/path/to/oh-my-opencode-maid/dist/tui.js"]
 }
 ```
 

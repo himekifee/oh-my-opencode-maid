@@ -1,6 +1,6 @@
 {
   "name": "oh-my-opencode-maid",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "OpenCode plugin that rewrites assistant replies through a hidden rewrite agent.",
   "type": "module",
   "license": "MIT",

@@ -9,7 +9,7 @@
 [![Built with Bun](https://img.shields.io/badge/built%20with-Bun-000000?logo=bun&logoColor=white)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![zod](https://img.shields.io/badge/validated%20with-zod-3e67b1)](https://zod.dev)
-![version](https://img.shields.io/badge/version-0.2.1-blueviolet)
+![version](https://img.shields.io/badge/version-0.2.2-blueviolet)
 
 [English](./README.md) · **简体中文**
 
@@ -105,7 +105,7 @@ OpenCode 的 CLI 会自动帮你注册**两个**入口 —— `oh-my-opencode-ma
 
 ```jsonc
 {
-  "plugin": ["oh-my-opencode-maid@0.2.1"]
+  "plugin": ["oh-my-opencode-maid@0.2.2"]
 }
 ```
 

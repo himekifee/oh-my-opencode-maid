@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
-import { DISPLAY_ONLY_FALLBACK } from "./fallback"
+import { DISPLAY_ONLY_FALLBACK, LEGACY_DISPLAY_ONLY_FALLBACK } from "./fallback"
 import { createResponseStore } from "./responses"
 import tuiModule from "./tui"
 
@@ -1265,7 +1265,7 @@ describe("tui fallback display", () => {
     expect("tui" in exports).toBe(false)
   })
 
-  test("opens sidecar original for completed fallback part events", async () => {
+  test("does not open sidecar originals for legacy fallback part events", async () => {
     await isolated(async (dir) => {
       const store = await createResponseStore()
       store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK, "Raw SECRET_TOKEN")
@@ -1287,8 +1287,43 @@ describe("tui fallback display", () => {
         },
       })
 
-      expect(runtime.dialogs).toEqual(["Raw SECRET_TOKEN"])
-      expect(runtime.sizes).toEqual(["xlarge"])
+      expect(runtime.dialogs).toEqual([])
+      expect(runtime.sizes).toEqual([])
+      await runtime.dispose?.()
+    })
+  })
+
+  test("does not treat pre-literal-change fallback text as successful rewrite text", async () => {
+    await isolated(async (dir) => {
+      await writeConfig({ show_original_draft: true })
+      const store = await createResponseStore()
+      store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, LEGACY_DISPLAY_ONLY_FALLBACK, "Raw SECRET_TOKEN")
+      store.close()
+      const runtime = fakeApi(dir)
+      const root = new FakeRenderable({}, { id: "root" })
+      const parent = new FakeRenderable({}, { id: "message-m" })
+      const target = new FakeTextRenderable({}, { id: "text-p" })
+      root.add(parent)
+      parent.add(target)
+      runtime.api.renderer = fakeRenderer(root)
+
+      await tuiModule.tui(runtime.api, undefined, { id: "maid-tui" })
+      runtime.handlers["message.part.updated"]?.({
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "p",
+            sessionID: "user-session",
+            messageID: "m",
+            type: "text",
+            text: LEGACY_DISPLAY_ONLY_FALLBACK,
+            time: { start: 1, end: 2 },
+          },
+        },
+      })
+
+      expect(parent.children.some((child) => child.id === "oh-my-opencode-maid-original-m-p")).toBe(false)
+      expect(runtime.dialogs).toEqual([])
       await runtime.dispose?.()
     })
   })

@@ -21,12 +21,12 @@
 
 ## ✨ What it does
 
-Once enabled, the plugin sits invisibly between the model and your terminal. The model's raw draft never reaches your eyes — it is rewritten through OpenCode itself, in the voice you configure.
+Once enabled, the plugin sits invisibly between the model and your terminal. On successful turns, the model's raw draft is rewritten through OpenCode itself before display; if that rewrite fails, the original draft is shown inline with an error toast instead.
 
 ```text
 You ▸ fix the failing test in src/foo.ts
 
-  ┌─ raw assistant draft (suppressed, never displayed) ─────────────┐
+  ┌─ raw assistant draft (suppressed on successful rewrites) ───────┐
   │ The bug is on line 42 — you're using == instead of ===.         │
   │ Change it and the test passes.                                  │
   └─────────────────────────────────────────────────────────────────┘
@@ -45,8 +45,8 @@ Facts, code, commands, paths, URLs, numbers, and markdown structure are preserve
 |---|---|
 | **Intercept** | Monkey patches around provider fetches, public event streams, global events, RPC messages, and plugin events suppress reachable raw text deltas. |
 | **Rewrite** | A hidden, tool-less `roleplay_rewrite` agent is prompted in a temporary OpenCode session and produces the visible final text. |
-| **Persist** | Successful rewrites store the stripped original in a private SQLite sidecar for display-only recovery; future model calls and compaction never receive the raw original. |
-| **Fail closed** | If a rewrite fails, the stripped original is shown only after display-only bookkeeping is persisted; otherwise the plugin emits neutral fallback text instead of leaking an untracked draft. |
+| **Persist** | Successful rewrites store the stripped original in a private SQLite sidecar for local recovery; future model calls receive the original draft instead of the visible roleplay text. |
+| **Failure path** | If a rewrite fails, the stripped original draft is shown inline as the normal assistant reply and an error toast explains that the original draft is being shown. |
 
 No OpenCode fork or source patch is required, but "plugin" undersells the mechanism: enabling it installs **process-wide monkey patches** and uses one private SDK field. Read the caveats below before adopting it.
 
@@ -59,7 +59,7 @@ This plugin is deliberately invasive. With `enabled: true` it patches, for the l
 - **`EventEmitter.prototype.emit`** — *process-wide*. Every `emit("event", …)` in the runtime (OpenCode core and any other plugin) passes through a filter that strips reachable raw-text deltas. This is the broadest patch and the one most likely to interact with other plugins or shift behavior across an OpenCode upgrade.
 - **`globalThis.postMessage`** (when present) — to scrub raw deltas from RPC messages.
 
-It also reads a **private SDK field** (`client._client`) as a fallback when the public client shape isn't found, in order to reach `session.create` / `session.prompt` / `session.delete`. That is internal surface and may break on an OpenCode upgrade; if it does, the plugin fails closed with neutral fallback text rather than exposing an untracked draft.
+It also reads a **private SDK field** (`client._client`) as a fallback when the public client shape isn't found, in order to reach `session.create` / `session.prompt` / `session.delete`. That is internal surface and may break on an OpenCode upgrade; if it does, the plugin emits a neutral failure message instead of exposing rewritten text that cannot be tied back to the original draft.
 
 Patches are reference-counted per project directory and torn down when the last instance unloads or is set to `enabled: false`. Originals are stored unencrypted in a `0600` SQLite file under a `0700` directory (see [Persistence & compaction](#-persistence--compaction)). If any of this is unacceptable in your environment, set `"enabled": false` — every patch is then skipped or removed.
 
@@ -177,7 +177,6 @@ For normal sessions the system prompt encourages the main agent to append a fenc
 
 With `dist/tui.js` active:
 
-- Rewrite failures resolve the stripped original from the sidecar store and show it in a **local** TUI dialog only.
 - Successful rewrite originals stay in the sidecar as display-only data. When `show_original_draft` is true and the host renderer tree is available, the TUI injects a host-realm OpenTUI row before the visible reply that starts as a local collapsed `+ Original Draft Content` block.
 - Clicking that renderer row fetches the original from the sidecar and expands it inline; clicking again collapses it and clears the raw text from the render-local row state. If renderer injection is unavailable or fails, no substitute decoration or overlay is shown.
 - The TUI decoration is render-local: it does not mutate messages, synthesize reasoning parts, or expose those originals to exported conversation context.
@@ -187,7 +186,7 @@ With `dist/tui.js` active:
 Successfully rewritten originals are stored as display-only rows in a private SQLite database at
 `$XDG_STATE_HOME/opencode/oh-my-opencode-maid/responses.sqlite`
 (or `$HOME/.local/state/opencode/oh-my-opencode-maid/responses.sqlite`).
-They are sidecar data for local display/recovery paths only. `experimental.chat.messages.transform` leaves the visible rewritten transcript intact, and compaction does not append raw originals into `output.context`. Rewrite-failure originals use the same display-only boundary and are also **not** restored into future model context or compaction.
+They are sidecar data for local display/recovery paths only. `experimental.chat.messages.transform` leaves the visible rewritten transcript intact for the user, but restores the original draft into future main-agent context so roleplay text does not contaminate the agent's working memory. Compaction does not append raw originals into `output.context`. Rewrite failures show the original draft inline and emit an error toast, so there is no rewritten roleplay text to remove from future context.
 
 ## 🤝 OMO compatibility
 
@@ -202,7 +201,7 @@ bun run typecheck
 bun run build
 ```
 
-Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled`, showing the matching status toast, and not calling the model for a command-result assistant turn. Exercise one rewrite-failure path to confirm the stripped original appears only after display-only sidecar persistence. Verify persistence-failure paths fail closed with neutral fallback text or `FAILURE` rather than exposing an untracked original. With `dist/tui.js` active, confirm successful rewrites do not show the collapsible original row by default. When `show_original_draft` is true, successful rewrites should show a local collapsed `+ Original Draft Content` renderer row when the host tree is available; it should expand inline on click, collapse on the next click, and never put raw original text into message history, logs, export, compaction, host decoration hints, or overlays. Fallback rows should open a local dialog without changing session history.
+Runtime QA should run inside tmux with OpenCode registered to the built `dist/index.js`: start a normal prompt, check whether the raw draft flashes, confirm the final reply follows `roleplay_prompt`, and exercise `/maid-rewrite-toggle` to confirm rewrites disable and re-enable immediately while persisting `enabled`, showing the matching status toast, and not calling the model for a command-result assistant turn. Exercise one rewrite-failure path to confirm the stripped original appears inline as the assistant reply and an error toast says the original draft is being shown. Verify persistence-failure paths avoid exposing untracked rewritten text and instead use neutral fallback text or `FAILURE` where appropriate. With `dist/tui.js` active, confirm successful rewrites do not show the collapsible original row by default. When `show_original_draft` is true, successful rewrites should show a local collapsed `+ Original Draft Content` renderer row when the host tree is available; it should expand inline on click, collapse on the next click, and never put raw original text into logs, export, compaction, host decoration hints, or overlays. Legacy fallback rows should not open a local dialog.
 
 ## 📜 License
 

@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync } from "node:fs"
 import path from "node:path"
 import { loadConfig } from "./config"
-import { DISPLAY_ONLY_FALLBACK } from "./fallback"
+import { DISPLAY_ONLY_FALLBACK, isDisplayOnlyFallback } from "./fallback"
 import { createResponseStore, type ResponseKey, type ResponseStore } from "./responses"
 
 type TuiDialog = {
@@ -312,29 +312,11 @@ function debugTui(event: string, data: Record<string, unknown> = {}) {
   }
 }
 
-function fallbackRefFromPart(directory: string, part: unknown): FallbackRef | undefined {
-  if (!record(part)) return undefined
-  if (part.type !== "text") return undefined
-  if (part.text !== DISPLAY_ONLY_FALLBACK) return undefined
-  if (!record(part.time) || typeof part.time.end !== "number") return undefined
-  const sessionID = stringField(part, "sessionID")
-  const messageID = stringField(part, "messageID")
-  const partID = stringField(part, "id") ?? stringField(part, "partID")
-  if (!sessionID || !messageID || !partID) return undefined
-  return { directory, sessionID, messageID, partID, visibleText: DISPLAY_ONLY_FALLBACK }
-}
-
-function fallbackRefFromEvent(directory: string, event: unknown): FallbackRef | undefined {
-  if (!record(event) || event.type !== "message.part.updated") return undefined
-  const properties = record(event.properties) ? event.properties : undefined
-  return fallbackRefFromPart(directory, properties?.part)
-}
-
 function successfulRewriteRefFromPart(directory: string, part: unknown): FallbackRef | undefined {
   if (!record(part)) return undefined
   if (part.type !== "text") return undefined
   const text = typeof part.text === "string" ? part.text : undefined
-  if (text === undefined || text === DISPLAY_ONLY_FALLBACK) return undefined
+  if (text === undefined || isDisplayOnlyFallback(text)) return undefined
   if (!record(part.time) || typeof part.time.end !== "number") return undefined
   const sessionID = stringField(part, "sessionID")
   const messageID = stringField(part, "messageID")
@@ -379,10 +361,6 @@ function currentSessionID(api: TuiApi) {
 
 function currentRouteDebug(api: TuiApi) {
   return { name: api.route.current.name, sessionID: currentSessionID(api) }
-}
-
-function isCurrentSessionRef(api: TuiApi, ref: ResponseKey) {
-  return ref.sessionID === currentSessionID(api)
 }
 
 function originalFor(store: ResponseStore | undefined, ref: FallbackRef) {
@@ -492,18 +470,6 @@ function drawInlineDraftRow(row: HostRenderable, buffer: HostBuffer, expandedTex
     if (drawY < 0 || drawY >= buffer.height) continue
     buffer.drawText(lines[index].slice(0, innerWidth), Math.floor(x) + 2, drawY, OVERLAY_FG, OVERLAY_BG)
   }
-}
-
-async function openOriginal(api: TuiApi, store: ResponseStore | undefined, ref: FallbackRef | undefined) {
-  if (!ref) return
-  const original = originalFor(store, ref)
-  if (original === undefined) return
-  api.ui.dialog.setSize("xlarge")
-  api.ui.dialog.replace(() => api.ui.DialogAlert({
-    title: "Original rewrite",
-    message: displayText(original),
-    onConfirm: () => api.ui.dialog.clear(),
-  }))
 }
 
 async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
@@ -860,14 +826,6 @@ async function tui(api: TuiApi, _options: unknown, _meta: TuiPluginMeta) {
   const unsubscribeEvent = api.event.on("message.part.updated", (event) => {
     debugTui("event.message.part.updated", eventDebug(event))
     if (isCurrentCompletedPartUpdate(event)) cleanupStaleCurrentSessionDecorations()
-    const fallbackRef = fallbackRefFromEvent(api.state.path.directory, event)
-    if (fallbackRef) {
-      if (hasOriginal(store, fallbackRef) && isCurrentSessionRef(api, fallbackRef)) {
-        void openOriginal(api, store, fallbackRef)
-      }
-      return
-    }
-
     const rewriteRef = successfulRewriteRefFromEvent(api, event)
     if (rewriteRef && store && config?.show_original_draft) {
       const key = decorationKey(rewriteRef)

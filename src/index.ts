@@ -6,7 +6,7 @@ import { FAILURE, finalResult, HANDOFF, handoffSystemPrompt, maidAgentPrompt, sp
 import { REWRITE_AGENT, SESSION_META_LOOKUP_FAILED, createDeltaSuppressor, disabledTools, formatModel, getSessionMeta, resolveModel, runMaid, type ModelSpec, type SessionMeta } from "./opencode"
 import { PROVIDER_REWRITE_HEADER, createProviderFetch, installCommandInterceptor, installProviderRewrite, installPublicStreamGate, uninstallProviderRewrite, uninstallPublicStreamGate } from "./patch"
 import { createResponseStore, type PendingProviderOriginal, type ResponseKey, type ResponseStore } from "./responses"
-import { DISPLAY_ONLY_FALLBACK } from "./fallback"
+import { DISPLAY_ONLY_FALLBACK, isDisplayOnlyFallback } from "./fallback"
 
 type MutableConfig = {
   agent?: Record<string, unknown>
@@ -39,6 +39,7 @@ declare global {
   var __ohMyOpencodeMaidPending: Map<string, PendingRewrite> | undefined
   var __ohMyOpencodeMaidPassthrough: Set<string> | undefined
   var __ohMyOpencodeMaidProviderTokens: Map<string, ProviderToken> | undefined
+  var __ohMyOpencodeMaidProviderOriginals: Map<string, PendingProviderOriginal[]> | undefined
   var __ohMyOpencodeMaidMainModels: Map<string, ModelSpec> | undefined
   var __ohMyOpencodeMaidUserPrompts: Map<string, string> | undefined
   var __ohMyOpencodeMaidRewriteHistory: Map<string, RewriteContextEntry[]> | undefined
@@ -209,6 +210,7 @@ const MaidPlugin: Plugin = async (ctx) => {
   const pending = globalThis.__ohMyOpencodeMaidPending ??= new Map<string, PendingRewrite>()
   const passthrough = globalThis.__ohMyOpencodeMaidPassthrough ??= new Set<string>()
   const providerTokens = globalThis.__ohMyOpencodeMaidProviderTokens ??= new Map<string, ProviderToken>()
+  const providerOriginals = globalThis.__ohMyOpencodeMaidProviderOriginals ??= new Map<string, PendingProviderOriginal[]>()
   const mainModels = globalThis.__ohMyOpencodeMaidMainModels ??= new Map<string, ModelSpec>()
   const userPrompts = globalThis.__ohMyOpencodeMaidUserPrompts ??= new Map<string, string>()
   const rewriteHistory = globalThis.__ohMyOpencodeMaidRewriteHistory ??= new Map<string, RewriteContextEntry[]>()
@@ -259,6 +261,11 @@ const MaidPlugin: Plugin = async (ctx) => {
   const clearPromptContextForSession = (id: string) => {
     userPrompts.delete(sessionKey(id))
     rewriteHistory.delete(sessionKey(id))
+  }
+  const providerOriginalKey = (sessionID: string, visibleText: string) => `${sessionKey(sessionID)}\0${visibleText}`
+  const clearVolatileProviderOriginals = (sessionID: string) => {
+    const prefix = `${sessionKey(sessionID)}\0`
+    for (const current of providerOriginals.keys()) if (current.startsWith(prefix)) providerOriginals.delete(current)
   }
   const rememberUserPrompt = (id: string | undefined, ...sources: unknown[]) => {
     if (cfg.rewrite_context_size <= 1 || !id || isDeletedSession(id) || isGuardedRewrite(id) || passthrough.has(id) || isCompacting(id)) return
@@ -318,6 +325,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       deletePendingForSession(id)
       mainModels.delete(sessionKey(id))
       clearPromptContextForSession(id)
+      clearVolatileProviderOriginals(id)
       try {
         responses?.deleteSession(ctx.directory, id)
       } catch {
@@ -408,7 +416,50 @@ const MaidPlugin: Plugin = async (ctx) => {
     if (!sessionID || isDeletedSession(sessionID) || !original) return
     responses.putPendingProviderOriginal(ctx.directory, sessionID, visible, original)
   }
-  const consumeProviderOriginal = (input: RewritePartKey, visible: string) => responses?.consumePendingProviderOriginal(responseKey(input), visible)
+  const tryRememberProviderOriginal = (sessionID: string | undefined, visible: string, original: string) => {
+    try {
+      rememberProviderOriginal(sessionID, visible, original)
+      return true
+    } catch {
+      return false
+    }
+  }
+  const rememberVolatileProviderOriginal = (sessionID: string | undefined, visible: string, original: string) => {
+    if (!sessionID || isDeletedSession(sessionID) || !original) return
+    const key = providerOriginalKey(sessionID, visible)
+    providerOriginals.set(key, [...(providerOriginals.get(key) ?? []), { originalText: original, displayOnly: true }].slice(-10))
+  }
+  const consumeVolatileProviderOriginal = (input: RewritePartKey, visible: string) => {
+    const key = providerOriginalKey(input.sessionID, visible)
+    const items = providerOriginals.get(key)
+    const item = items?.shift()
+    if (!items?.length) providerOriginals.delete(key)
+    return item
+  }
+  const consumeProviderOriginal = (input: RewritePartKey, visible: string) => {
+    try {
+      return responses?.consumePendingProviderOriginal(responseKey(input), visible) ?? consumeVolatileProviderOriginal(input, visible)
+    } catch (error) {
+      const original = consumeVolatileProviderOriginal(input, visible)
+      if (original) return original
+      throw error
+    }
+  }
+  const toast = async (input: ServerToast) => {
+    try {
+      await ctx.client.tui.showToast({ body: input })
+    } catch {
+      return undefined
+    }
+  }
+  const notifyRewriteFailed = async () => {
+    await toast({
+      variant: "error",
+      title: "Rewrite failed",
+      message: "The rewrite failed, so the original draft is being shown.",
+      duration: 5000,
+    })
+  }
   const pendingPrefix = (id: string) => `${ctx.directory}/${id}/`
   const deletePendingForSession = (id: string) => {
     const prefix = pendingPrefix(id)
@@ -449,13 +500,18 @@ const MaidPlugin: Plugin = async (ctx) => {
     const capturedUserPrompt = currentPromptContext(sessionID)
     const result = await rewrite(draft, sessionID, capturedUserPrompt)
     if (!isEnabled()) return original
-    const visible = result.rewritten ? result.text : DISPLAY_ONLY_FALLBACK
+    if (!result.rewritten) {
+      await notifyRewriteFailed()
+      if (!tryRememberProviderOriginal(sessionID, original, original)) rememberVolatileProviderOriginal(sessionID, original, original)
+      return original
+    }
+    const visible = result.text
     try {
       rememberProviderOriginal(sessionID, visible, original)
     } catch {
       return DISPLAY_ONLY_FALLBACK
     }
-    if (result.rewritten) rememberSuccessfulRewrite(sessionID, visible, capturedUserPrompt)
+    rememberSuccessfulRewrite(sessionID, visible, capturedUserPrompt)
     return visible
   }
   const useContextOriginals = async (output: unknown) => {
@@ -504,10 +560,6 @@ const MaidPlugin: Plugin = async (ctx) => {
     uninstallPublicStreamGate(ctx.directory)
   }
   await setRuntimeEnabled(cfg.enabled)
-
-  const toast = async (input: ServerToast) => {
-    await ctx.client.tui.showToast({ body: input }).catch(() => undefined)
-  }
 
   const setCommandOutput = (parts: Array<{ type: string; text?: string; synthetic?: boolean }>, text: string) => {
     for (const part of parts) {
@@ -738,7 +790,7 @@ const MaidPlugin: Plugin = async (ctx) => {
         output.text = item.text
         return
       }
-      if (item.text === DISPLAY_ONLY_FALLBACK) {
+      if (isDisplayOnlyFallback(item.text)) {
         output.text = DISPLAY_ONLY_FALLBACK
         return
       }
@@ -755,7 +807,7 @@ const MaidPlugin: Plugin = async (ctx) => {
       let entry: PendingRewrite | undefined
       const capturedUserPrompt = currentPromptContext(input.sessionID)
       const work = rewrite(output.text, input.sessionID, capturedUserPrompt)
-        .then((result) => {
+        .then(async (result) => {
           if (!entry || pending.get(done) !== entry) return result
           if (!isEnabled()) return { text: item.text, rewritten: false }
           if (result.rewritten) {
@@ -767,12 +819,8 @@ const MaidPlugin: Plugin = async (ctx) => {
             rememberSuccessfulRewrite(input.sessionID, result.text, capturedUserPrompt)
             completed.set(done, { originalText: item.text, visibleText: result.text })
           } else {
-            try {
-              storeDisplayOriginal(input, DISPLAY_ONLY_FALLBACK, item.text)
-            } catch {
-              return { text: FAILURE, rewritten: false }
-            }
-            return { text: DISPLAY_ONLY_FALLBACK, rewritten: false }
+            await notifyRewriteFailed()
+            return { text: item.text, rewritten: false }
           }
           return result
         })

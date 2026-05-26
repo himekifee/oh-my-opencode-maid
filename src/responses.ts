@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { chmod, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { DISPLAY_ONLY_FALLBACK } from "./fallback"
+import { DISPLAY_ONLY_FALLBACK, LEGACY_DISPLAY_ONLY_FALLBACK } from "./fallback"
 
 export type ResponseKey = {
   directory: string
@@ -86,11 +86,13 @@ export async function createResponseStore(): Promise<ResponseStore> {
   ensureColumn(db, "responses", "visible_text", "TEXT NOT NULL DEFAULT ''")
   ensureColumn(db, "responses", "display_only", "INTEGER NOT NULL DEFAULT 0")
   ensureColumn(db, "responses", "updated_at", "INTEGER NOT NULL DEFAULT 0")
-  db.query(`
+  const markFallbackResponses = db.query(`
     UPDATE responses
     SET display_only = 1
     WHERE visible_text = $visible_text
-  `).run({ $visible_text: DISPLAY_ONLY_FALLBACK })
+  `)
+  markFallbackResponses.run({ $visible_text: DISPLAY_ONLY_FALLBACK })
+  markFallbackResponses.run({ $visible_text: LEGACY_DISPLAY_ONLY_FALLBACK })
   db.exec(`
     CREATE TABLE IF NOT EXISTS pending_provider_originals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,11 +106,13 @@ export async function createResponseStore(): Promise<ResponseStore> {
   `)
   ensureColumn(db, "pending_provider_originals", "session_id", "TEXT NOT NULL DEFAULT ''")
   ensureColumn(db, "pending_provider_originals", "display_only", "INTEGER NOT NULL DEFAULT 0")
-  db.query(`
+  const markFallbackPending = db.query(`
     UPDATE pending_provider_originals
     SET display_only = 1
     WHERE visible_text = $visible_text
-  `).run({ $visible_text: DISPLAY_ONLY_FALLBACK })
+  `)
+  markFallbackPending.run({ $visible_text: DISPLAY_ONLY_FALLBACK })
+  markFallbackPending.run({ $visible_text: LEGACY_DISPLAY_ONLY_FALLBACK })
   db.exec(`
     CREATE INDEX IF NOT EXISTS pending_provider_originals_lookup
     ON pending_provider_originals (directory, session_id, visible_text, id)
@@ -149,6 +153,7 @@ export async function createResponseStore(): Promise<ResponseStore> {
       AND part_id = $part_id
       AND visible_text = $visible_text
       AND visible_text != $fallback_visible_text
+      AND visible_text != $legacy_fallback_visible_text
     LIMIT 1
   `)
   const insertPending = db.query(`
@@ -202,6 +207,7 @@ export async function createResponseStore(): Promise<ResponseStore> {
     WHERE directory = $directory
       AND session_id = $session_id
       AND visible_text != $fallback_visible_text
+      AND visible_text != $legacy_fallback_visible_text
     ORDER BY updated_at DESC, created_at DESC, message_id DESC, part_id DESC
     LIMIT $limit
   `)
@@ -223,7 +229,8 @@ export async function createResponseStore(): Promise<ResponseStore> {
     pruneExpiredPending.run({ $ttl: PENDING_PROVIDER_ORIGINAL_TTL_SECONDS })
     const row = selectPending.get({ $directory: key.directory, $session_id: key.sessionID, $visible_text: visibleText, $ttl: PENDING_PROVIDER_ORIGINAL_TTL_SECONDS })
     if (!record(row) || typeof row.id !== "number" || typeof row.original_text !== "string") return undefined
-    writeOriginal(key, visibleText, row.original_text, true)
+    if (row.original_text !== visibleText) writeOriginal(key, visibleText, row.original_text, true)
+    else deleteOriginalByKey.run(params(key))
     deletePending.run({ $id: row.id })
     return { originalText: row.original_text, displayOnly: true }
   })
@@ -251,7 +258,7 @@ export async function createResponseStore(): Promise<ResponseStore> {
       return row.text
     },
     getContextOriginal(key, visibleText) {
-      const row = selectContext.get({ ...params(key), $visible_text: visibleText, $fallback_visible_text: DISPLAY_ONLY_FALLBACK })
+      const row = selectContext.get({ ...params(key), $visible_text: visibleText, $fallback_visible_text: DISPLAY_ONLY_FALLBACK, $legacy_fallback_visible_text: LEGACY_DISPLAY_ONLY_FALLBACK })
       if (!record(row) || typeof row.text !== "string") return undefined
       return row.text
     },
@@ -274,6 +281,7 @@ export async function createResponseStore(): Promise<ResponseStore> {
         $directory: directory,
         $session_id: sessionID,
         $fallback_visible_text: DISPLAY_ONLY_FALLBACK,
+        $legacy_fallback_visible_text: LEGACY_DISPLAY_ONLY_FALLBACK,
         $limit: limit,
       }).reverse()
       return rows.flatMap((row) => {

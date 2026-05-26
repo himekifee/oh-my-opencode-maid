@@ -6,7 +6,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import MaidPlugin from "./index"
 import { MAIN_AGENT_MODEL } from "./config"
-import { DISPLAY_ONLY_FALLBACK } from "./fallback"
+import { DISPLAY_ONLY_FALLBACK, LEGACY_DISPLAY_ONLY_FALLBACK } from "./fallback"
 import { PROVIDER_REWRITE_HEADER, resetPublicStreamGate } from "./patch"
 import { createResponseStore, responseDatabasePath, type ResponseStore } from "./responses"
 import { FAILURE, HANDOFF, handoffSystemPrompt } from "./rewrite"
@@ -1652,6 +1652,7 @@ describe("plugin hooks", () => {
   test("does not cache failed rewrites as completed", async () => {
     await isolated(async (dir) => {
       let prompts = 0
+      const toasts: ToastCall[] = []
       const hooks = await MaidPlugin(ctx({
         async create() {
           return { data: { id: `maid-session-${prompts}` } }
@@ -1664,7 +1665,7 @@ describe("plugin hooks", () => {
         async delete() {
           return { data: true }
         },
-      }, dir))
+      }, dir, toasts))
       const input = { sessionID: "user-session", messageID: "m", partID: "p" }
       const first = { text: "Raw SECRET_TOKEN" }
       const second = { text: "Raw SECRET_TOKEN" }
@@ -1674,16 +1675,18 @@ describe("plugin hooks", () => {
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [firstPart] }]))
       await hooks["experimental.text.complete"]?.(input, second)
 
-      expect(first.text).toBe(DISPLAY_ONLY_FALLBACK)
-      expect(firstPart.text).toBe(DISPLAY_ONLY_FALLBACK)
+      expect(first.text).toBe("Raw SECRET_TOKEN")
+      expect(firstPart.text).toBe("Raw SECRET_TOKEN")
       expect(second.text).toBe("Maid SECRET_TOKEN")
       expect(prompts).toBe(2)
+      expect(toasts).toEqual([{ body: { variant: "error", title: "Rewrite failed", message: "The rewrite failed, so the original draft is being shown.", duration: 5000 } }])
     })
   })
 
-  test("failed rewrites show fallback text while preserving display-only sidecar originals", async () => {
+  test("failed rewrites show original draft inline with a toast", async () => {
     await isolated(async (dir) => {
       let prompts = 0
+      const toasts: ToastCall[] = []
       const hooks = await MaidPlugin(ctx({
         async create() {
           return { data: { id: `maid-session-${prompts}` } }
@@ -1695,25 +1698,23 @@ describe("plugin hooks", () => {
         async delete() {
           return { data: true }
         },
-      }, dir))
+      }, dir, toasts))
       const input = { sessionID: "user-session", messageID: "m", partID: "p" }
       const first = { text: "Raw SECRET_TOKEN" }
-      const repeated = { text: DISPLAY_ONLY_FALLBACK }
-      const part = { type: "text", id: "p", text: DISPLAY_ONLY_FALLBACK }
+      const part = { type: "text", id: "p", text: "Raw SECRET_TOKEN" }
       const compacted = { context: [] as string[] }
 
       await hooks["experimental.text.complete"]?.(input, first)
-      await hooks["experimental.text.complete"]?.(input, repeated)
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
       await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
 
-      expect(first.text).toBe(DISPLAY_ONLY_FALLBACK)
-      expect(repeated.text).toBe(DISPLAY_ONLY_FALLBACK)
-      expect(part.text).toBe(DISPLAY_ONLY_FALLBACK)
-      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBe("Raw SECRET_TOKEN")
-      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBeUndefined()
+      expect(first.text).toBe("Raw SECRET_TOKEN")
+      expect(part.text).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Raw SECRET_TOKEN")).toBeUndefined()
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Raw SECRET_TOKEN")).toBeUndefined()
       expect(compacted.context.join("\n")).not.toContain("Raw SECRET_TOKEN")
       expect(prompts).toBe(1)
+      expect(toasts).toEqual([{ body: { variant: "error", title: "Rewrite failed", message: "The rewrite failed, so the original draft is being shown.", duration: 5000 } }])
     })
   })
 
@@ -1760,6 +1761,50 @@ describe("plugin hooks", () => {
 
       expect(part.text).toBe(DISPLAY_ONLY_FALLBACK)
       expect(compacted.context.join("\n")).not.toContain("Legacy raw SECRET_TOKEN")
+    })
+  })
+
+  test("pre-literal-change fallback rows remain display-only legacy originals", async () => {
+    await isolated(async (dir) => {
+      await mkdir(path.dirname(responseDatabasePath()), { recursive: true })
+      const db = new Database(responseDatabasePath(), { create: true })
+      db.exec(`
+        CREATE TABLE responses (
+          directory TEXT NOT NULL,
+          session_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          part_id TEXT NOT NULL,
+          visible_text TEXT NOT NULL DEFAULT '',
+          text TEXT NOT NULL,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          PRIMARY KEY (directory, session_id, message_id, part_id)
+        ) WITHOUT ROWID
+      `)
+      db.query(`
+        INSERT INTO responses (directory, session_id, message_id, part_id, visible_text, text)
+        VALUES ($directory, $session_id, $message_id, $part_id, $visible_text, $text)
+      `).run({
+        $directory: dir,
+        $session_id: "user-session",
+        $message_id: "m",
+        $part_id: "p",
+        $visible_text: LEGACY_DISPLAY_ONLY_FALLBACK,
+        $text: "Legacy raw SECRET_TOKEN",
+      })
+      db.close()
+
+      const store = await createResponseStore()
+      expect(store.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, LEGACY_DISPLAY_ONLY_FALLBACK)).toBe("Legacy raw SECRET_TOKEN")
+      expect(store.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, LEGACY_DISPLAY_ONLY_FALLBACK)).toBeUndefined()
+      store.close()
+      const hooks = await MaidPlugin(ctx({}, dir))
+      const part = { type: "text", id: "p", text: LEGACY_DISPLAY_ONLY_FALLBACK }
+
+      await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, part)
+
+      expect(part.text).toBe(DISPLAY_ONLY_FALLBACK)
     })
   })
 
@@ -1849,7 +1894,7 @@ describe("plugin hooks", () => {
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
       await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
 
-      expect(output.text).toBe(DISPLAY_ONLY_FALLBACK)
+      expect(output.text).toBe("New raw SECRET_TOKEN")
       expect(compacted.context.join("\n")).not.toContain("Old raw SECRET_TOKEN")
       expect(compacted.context.join("\n")).not.toContain("New raw SECRET_TOKEN")
     })
@@ -1857,6 +1902,62 @@ describe("plugin hooks", () => {
 
   test("falls back to provider originals for failed rewrites", async () => {
     await isolated(async (dir) => {
+      let prompts = 0
+      const toasts: ToastCall[] = []
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts}` } }
+        },
+        async prompt() {
+          prompts += 1
+          throw new Error("rewrite failed")
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir, toasts))
+      const cfg: Config = {
+        provider: {
+          fake: {
+            options: {
+              fetch: async () => new Response(JSON.stringify({ choices: [{ message: { content: carry("Raw SECRET_TOKEN") } }] }), {
+                headers: { "content-type": "application/json" },
+              }),
+            },
+          },
+        },
+      } as unknown as Config
+
+      await hooks.config?.(cfg)
+      const fetcher = (cfg.provider?.fake as unknown as { options?: { fetch?: typeof fetch } }).options?.fetch
+      if (!fetcher) throw new Error("provider fetch was not installed")
+      const response = await fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: await providerHeaders(hooks),
+        body: providerBody(),
+      }).then((res) => res.text())
+      const output = { text: "Raw SECRET_TOKEN" }
+
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
+      const part = { type: "text", id: "p", text: output.text }
+      await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
+
+      expect(response).toContain("Raw SECRET_TOKEN")
+      expect(response).not.toContain(DISPLAY_ONLY_FALLBACK)
+      expect(output.text).toBe("Raw SECRET_TOKEN")
+      expect(part.text).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Raw SECRET_TOKEN")).toBeUndefined()
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Raw SECRET_TOKEN")).toBeUndefined()
+      expect(prompts).toBe(1)
+      expect(toasts).toEqual([{ body: { variant: "error", title: "Rewrite failed", message: "The rewrite failed, so the original draft is being shown.", duration: 5000 } }])
+    })
+  })
+
+  test("provider failed same-key rewrites remove stale successful originals", async () => {
+    await isolated(async (dir) => {
+      const store = await createResponseStore()
+      store.putOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Old visible SECRET_TOKEN", "Old raw SECRET_TOKEN")
+      store.close()
       let prompts = 0
       const hooks = await MaidPlugin(ctx({
         async create() {
@@ -1885,23 +1986,24 @@ describe("plugin hooks", () => {
       await hooks.config?.(cfg)
       const fetcher = (cfg.provider?.fake as unknown as { options?: { fetch?: typeof fetch } }).options?.fetch
       if (!fetcher) throw new Error("provider fetch was not installed")
-      const response = await fetcher("https://provider.example/v1/chat/completions", {
+      await fetcher("https://provider.example/v1/chat/completions", {
         method: "POST",
         headers: await providerHeaders(hooks),
         body: providerBody(),
-      }).then((res) => res.text())
-      const output = { text: DISPLAY_ONLY_FALLBACK }
+      })
+      const output = { text: "Raw SECRET_TOKEN" }
+      const part = { type: "text", id: "p", text: output.text }
+      const compacted = { context: [] as string[] }
 
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
-      const part = { type: "text", id: "p", text: output.text }
       await hooks["experimental.chat.messages.transform"]?.({}, messages([{ info: { role: "assistant", sessionID: "user-session", id: "m" }, parts: [part] }]))
+      await hooks["experimental.session.compacting"]?.({ sessionID: "user-session" }, compacted)
 
-      expect(response).toContain(DISPLAY_ONLY_FALLBACK)
-      expect(response).not.toContain("Raw SECRET_TOKEN")
-      expect(output.text).toBe(DISPLAY_ONLY_FALLBACK)
-      expect(part.text).toBe(DISPLAY_ONLY_FALLBACK)
-      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBe("Raw SECRET_TOKEN")
-      expect(globalThis.__ohMyOpencodeMaidResponses?.getContextOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, DISPLAY_ONLY_FALLBACK)).toBeUndefined()
+      expect(output.text).toBe("Raw SECRET_TOKEN")
+      expect(part.text).toBe("Raw SECRET_TOKEN")
+      expect(globalThis.__ohMyOpencodeMaidResponses?.getOriginal({ directory: dir, sessionID: "user-session", messageID: "m", partID: "p" }, "Old visible SECRET_TOKEN")).toBeUndefined()
+      expect(compacted.context.join("\n")).not.toContain("Old raw SECRET_TOKEN")
+      expect(compacted.context.join("\n")).not.toContain("Raw SECRET_TOKEN")
       expect(prompts).toBe(1)
     })
   })
@@ -1942,19 +2044,19 @@ describe("plugin hooks", () => {
         headers: await providerHeaders(hooks),
         body: providerBody(),
       })
-      const providerOutput = { text: DISPLAY_ONLY_FALLBACK }
+      const providerOutput = { text: "Raw SECRET_TOKEN" }
       const retryOutput = { text: "Raw SECRET_TOKEN" }
 
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, providerOutput)
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, retryOutput)
 
-      expect(providerOutput.text).toBe(DISPLAY_ONLY_FALLBACK)
+      expect(providerOutput.text).toBe("Raw SECRET_TOKEN")
       expect(retryOutput.text).toBe("Maid SECRET_TOKEN")
       expect(prompts).toBe(2)
     })
   })
 
-  test("persistence write failures fail closed without original drafts", async () => {
+  test("persistence write failures avoid exposing rewritten text without stored originals", async () => {
     await isolated(async (dir) => {
       let directPrompts = 0
       globalThis.__ohMyOpencodeMaidResponses = fakeResponseStore({
@@ -2027,9 +2129,63 @@ describe("plugin hooks", () => {
     })
   })
 
-  test("display-only persistence failures fail closed without original drafts", async () => {
+  test("provider rewrite failures show originals even when pending persistence is unavailable", async () => {
     await isolated(async (dir) => {
       let prompts = 0
+      const toasts: ToastCall[] = []
+      globalThis.__ohMyOpencodeMaidResponses = fakeResponseStore({
+        putPendingProviderOriginal() {
+          throw new Error("pending write failed")
+        },
+      })
+      const hooks = await MaidPlugin(ctx({
+        async create() {
+          return { data: { id: `maid-session-${prompts}` } }
+        },
+        async prompt() {
+          prompts += 1
+          throw new Error("rewrite failed")
+        },
+        async delete() {
+          return { data: true }
+        },
+      }, dir, toasts))
+      const cfg: Config = {
+        provider: {
+          fake: {
+            options: {
+              fetch: async () => new Response(JSON.stringify({ choices: [{ message: { content: carry("Raw provider SECRET_TOKEN") } }] }), {
+                headers: { "content-type": "application/json" },
+              }),
+            },
+          },
+        },
+      } as unknown as Config
+
+      await hooks.config?.(cfg)
+      const fetcher = (cfg.provider?.fake as unknown as { options?: { fetch?: typeof fetch } }).options?.fetch
+      if (!fetcher) throw new Error("provider fetch was not installed")
+      const response = await fetcher("https://provider.example/v1/chat/completions", {
+        method: "POST",
+        headers: await providerHeaders(hooks),
+        body: providerBody(),
+      }).then((res) => res.text())
+      const output = { text: "Raw provider SECRET_TOKEN" }
+
+      await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
+
+      expect(response).toContain("Raw provider SECRET_TOKEN")
+      expect(response).not.toContain(DISPLAY_ONLY_FALLBACK)
+      expect(output.text).toBe("Raw provider SECRET_TOKEN")
+      expect(prompts).toBe(1)
+      expect(toasts).toEqual([{ body: { variant: "error", title: "Rewrite failed", message: "The rewrite failed, so the original draft is being shown.", duration: 5000 } }])
+    })
+  })
+
+  test("failed rewrites show original drafts even when display-only persistence is unavailable", async () => {
+    await isolated(async (dir) => {
+      let prompts = 0
+      const toasts: ToastCall[] = []
       globalThis.__ohMyOpencodeMaidResponses = fakeResponseStore({
         putDisplayOriginal() {
           throw new Error("display write failed")
@@ -2046,17 +2202,18 @@ describe("plugin hooks", () => {
         async delete() {
           return { data: true }
         },
-      }, dir))
+      }, dir, toasts))
       const output = { text: "Raw SECRET_TOKEN" }
 
       await hooks["experimental.text.complete"]?.({ sessionID: "user-session", messageID: "m", partID: "p" }, output)
 
-      expect(output.text).toBe(FAILURE)
+      expect(output.text).toBe("Raw SECRET_TOKEN")
       expect(prompts).toBe(1)
+      expect(toasts).toEqual([{ body: { variant: "error", title: "Rewrite failed", message: "The rewrite failed, so the original draft is being shown.", duration: 5000 } }])
     })
   })
 
-  test("persistence read and delete failures fail closed without original drafts", async () => {
+  test("persistence read and delete failures avoid exposing untracked rewrite output", async () => {
     await isolated(async (dir) => {
       let consumePrompts = 0
       globalThis.__ohMyOpencodeMaidResponses = fakeResponseStore({
@@ -2098,7 +2255,7 @@ describe("plugin hooks", () => {
     })
   })
 
-  test("response store initialization failures fail closed", async () => {
+  test("response store initialization failures avoid exposing rewritten text", async () => {
     await isolated(async (dir) => {
       await writeFile(path.join(dir, "state"), "not a directory")
       let prompts = 0
